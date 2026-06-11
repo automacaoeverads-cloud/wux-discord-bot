@@ -16,17 +16,21 @@ Ele faz as explosões sozinho e devolve **êxitos** e **dissonâncias** automati
 |---|---|
 | `/rolar dados:8` | rola 8d6 |
 | `/rolar dados:8 modificador:2` | 8 +2 = 10d6 (postura, etc.) |
+| `/rolar dados:8 exitos_bonus:1` | soma **+1 êxito automático** (Supressão de Reino) |
 | `/rolar dados:8 dificuldade:3` | mostra **passou/falhou** e **margem** |
 | `/rolar dados:8 volatil:true` | ação Volátil — **destaca as Dissonâncias** |
 | `/rolar dados:8 rotulo:"Golpe do Arado"` | nomeia a rolagem |
 
-**Prefixo:**
+**Prefixo (aceita expressões):**
 
 | Comando | Faz |
 |---|---|
 | `!r 8` | rola 8d6 |
-| `!r 8 Golpe do Arado` | 8d6 com rótulo |
+| `!r 8+2 Golpe do Arado` | 8 **+2 dados** = 10d6, com rótulo |
+| `!r 8+2-1` | soma e subtrai dados |
+| `!r 8+1e` | rola 8d6 e soma **+1 êxito automático** ao resultado |
 | `!rv 8 Técnica volátil` | rolagem de ação **Volátil** |
+| `!ajuda` | resumo dos comandos |
 
 > O `!r`/`!rv` precisa da **Message Content Intent** ligada (passo 3). O `/rolar` não precisa.
 
