@@ -3,13 +3,18 @@
 Bot de rolagem do WUX — A Senda dos Mil Reinos.
 
 Comandos:
-  /rolar dados:<n> [modificador] [dificuldade] [volatil] [rotulo]   — comando de barra
-  !r <n> [rótulo...]      — prefixo (normal)
-  !rv <n> [rótulo...]     — prefixo (ação Volátil: destaca Dissonâncias)
+  /rolar dados:<n> [modificador] [exitos_bonus] [dificuldade] [volatil] [rotulo]
+  !r  <expressão> [rótulo]    — ex.: !r 8+2 Golpe do Arado   (+2 = dados extras)
+  !rv <expressão> [rótulo]    — ação Volátil (destaca Dissonâncias)
+  !ajuda                      — resumo dos comandos
+
+Expressão: 8 · 8+2 · 8+2-1 · 8+1e (o sufixo "e" soma ÊXITOS automáticos,
+ex.: Supressão de Reino, em vez de dados).
 
 Regra: pool de d6 · 5–6 = Êxito ✦ · 6 explode · 1 = Dissonância.
 """
 import os
+import re
 
 import discord
 from discord import app_commands
@@ -21,8 +26,11 @@ from dados import rolar, Resultado, MAX_DADOS
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-COR_VINHO = 0x8B1E2D
-RODAPE = "5–6 = Êxito ✦  ·  6 explode  ·  1 = Dissonância"
+COR_VINHO = 0x8B1E2D     # rolagem normal
+COR_OURO = 0xC9A227      # rolagem brilhante (5+ êxitos ou 2+ explosões)
+COR_CINZA = 0x5C5F66     # 0 êxitos
+COR_VERMELHO = 0xD83C3E  # ação Volátil com Dissonância
+RODAPE = "✦ 5–6 = Êxito  ·  💥 6 explode  ·  ⚠️ 1 = Dissonância"
 
 intents = discord.Intents.default()
 intents.message_content = True  # necessário para os comandos de prefixo (!r)
@@ -30,63 +38,119 @@ intents.message_content = True  # necessário para os comandos de prefixo (!r)
 bot = commands.Bot(command_prefix=("!",), intents=intents, help_command=None)
 
 
+# ─────────────────────────────  expressão do !r  ─────────────────────────────
+
+EXPR_HEAD = re.compile(r"^\s*(\d+(?:\s*[+\-]\s*\d+\s*[eE✦]?)*)(.*)$")
+EXPR_TOKEN = re.compile(r"([+\-]?)\s*(\d+)\s*([eE✦]?)")
+
+
+def parse_expressao(texto: str):
+    """'8 + 2 - 1 +1e Golpe do Arado' → (base, mod_dados, bonus_exitos, mods, rótulo).
+
+    Números somados com +/− viram DADOS; com sufixo e/✦ viram ÊXITOS automáticos.
+    Devolve None se o texto não começa com um número.
+    """
+    m = EXPR_HEAD.match(texto or "")
+    if not m or not m.group(1):
+        return None
+    expr, rotulo = m.group(1), (m.group(2) or "").strip()
+
+    base = None
+    mod_dados = 0
+    bonus_exitos = 0
+    mods = []
+    for sinal, num, e in EXPR_TOKEN.findall(expr):
+        n = int(num)
+        v = -n if sinal == "-" else n
+        if base is None and not e:
+            base = v
+            continue
+        simbolo = "+" if v >= 0 else "−"
+        if e:
+            bonus_exitos += v
+            mods.append(f"{simbolo}{abs(v)}✦")
+        else:
+            mod_dados += v
+            mods.append(f"{simbolo}{abs(v)}")
+    if base is None or base < 1:
+        return None
+    return base, mod_dados, bonus_exitos, mods, rotulo
+
+
 # ─────────────────────────────  formatação  ─────────────────────────────
 
-def _fmt_face(f: int) -> str:
-    if f >= 5:
-        return f"**{f}**"      # êxito (5 ou 6) em negrito
-    if f == 1:
-        return f"~~{f}~~"      # dissonância riscada
-    return str(f)
-
-
-def _fmt_cadeia(cadeia: list) -> str:
-    # explosões ligadas por seta: 6→4 , 6→6→2 ...
-    return "→".join(_fmt_face(f) for f in cadeia)
+def _chip(cadeia: list) -> str:
+    """Um dado (e suas explosões) como chip: `6→4` — negrito se êxito, riscado se 1."""
+    chip = f"`{'→'.join(str(f) for f in cadeia)}`"
+    if any(f >= 5 for f in cadeia):
+        chip = f"**{chip}**"
+    if any(f == 1 for f in cadeia):
+        chip = f"~~{chip}~~"
+    return chip
 
 
 def montar_embed(res: Resultado, rotulo: str = None, volatil: bool = False,
-                 modificador: int = 0, base: int = None) -> discord.Embed:
-    titulo = f"🎲 {rotulo}" if rotulo else "🎲 Rolagem WUX"
-    emb = discord.Embed(title=titulo, color=COR_VINHO)
+                 base: int = None, mods: list = None, bonus_exitos: int = 0,
+                 dificuldade: int = None, autor: discord.abc.User = None) -> discord.Embed:
+    total = max(0, res.exitos + bonus_exitos)
 
-    # linha do pool (mostra base + modificador quando houver)
-    if modificador and base is not None:
-        sinal = f"+{modificador}" if modificador > 0 else str(modificador)
-        pool_txt = f"**{res.pool}d6**  ({base} {sinal})"
+    if volatil and res.dissonancias:
+        cor = COR_VERMELHO
+    elif total == 0:
+        cor = COR_CINZA
+    elif res.seises >= 2 or total >= 5:
+        cor = COR_OURO
     else:
-        pool_txt = f"**{res.pool}d6**"
-    emb.add_field(name="Pool", value=pool_txt, inline=True)
+        cor = COR_VINHO
 
+    linhas = []
+
+    # pool + explosões
+    pool_txt = f"**{res.pool}d6**"
+    if mods and base is not None:
+        pool_txt += f"  ({base} {' '.join(mods)})"
     if res.seises:
-        emb.add_field(name="Explosões", value=f"💥 {res.seises}", inline=True)
+        pool_txt += f"   ·   💥 {res.seises} explos{'ões' if res.seises > 1 else 'ão'}"
+    if volatil:
+        pool_txt += "   ·   🌀 Volátil"
+    linhas.append(pool_txt)
+    linhas.append("")
 
-    # os dados
+    # os dados, em chips
     if res.cadeias:
-        linha = "  ".join(_fmt_cadeia(c) for c in res.cadeias)
-    else:
-        linha = "—"
-    if len(linha) > 1010:
-        linha = linha[:1010] + " …"
-    emb.add_field(name="Dados", value=linha, inline=False)
+        dados_txt = "  ".join(_chip(c) for c in res.cadeias)
+        if len(dados_txt) > 3500:
+            dados_txt = dados_txt[:3500] + " …"
+        linhas.append(dados_txt)
+    linhas.append("")
 
-    # resultado
-    plural = "Êxito" if res.exitos == 1 else "Êxitos"
-    partes = [f"# {res.exitos} ✦ {plural}"]
+    # resultado grande
+    plural = "Êxito" if total == 1 else "Êxitos"
+    linhas.append(f"# {total} ✦ {plural}")
+    if bonus_exitos:
+        sim = "+" if bonus_exitos > 0 else "−"
+        linhas.append(f"-# {res.exitos} rolado(s) {sim} {abs(bonus_exitos)} automático(s)")
 
-    if res.dificuldade is not None:
-        if res.passou:
-            partes.append(f"✅ **Passou** — Margem **+{res.margem}**")
+    if dificuldade is not None:
+        margem = total - dificuldade
+        if margem >= 0:
+            linhas.append(f"✅ **Passou** (dif. {dificuldade}) — Margem **+{margem}**")
         else:
-            partes.append(f"❌ **Falhou** — faltou **{-res.margem}**")
+            linhas.append(f"❌ **Falhou** (dif. {dificuldade}) — faltou **{-margem}**")
 
     if res.dissonancias:
         if volatil:
-            partes.append(f"⚠️ **{res.dissonancias} Dissonância(s)** (ação Volátil!)")
+            linhas.append(f"⚠️ **{res.dissonancias} Dissonância{'s' if res.dissonancias > 1 else ''}** — ação Volátil!")
         else:
-            partes.append(f"⚠️ {res.dissonancias} Dissonância(s)")
+            linhas.append(f"-# ⚠️ {res.dissonancias} Dissonância{'s' if res.dissonancias > 1 else ''}")
 
-    emb.add_field(name="Resultado", value="\n".join(partes), inline=False)
+    emb = discord.Embed(
+        title=f"🎲  {rotulo}" if rotulo else "🎲  Rolagem WUX",
+        description="\n".join(linhas),
+        color=cor,
+    )
+    if autor is not None:
+        emb.set_author(name=autor.display_name, icon_url=autor.display_avatar.url)
     emb.set_footer(text=RODAPE)
     return emb
 
@@ -109,7 +173,8 @@ async def on_ready():
 @bot.tree.command(name="rolar", description="Rola um pool de d6 (WUX): 5–6 êxito, 6 explode, 1 dissonância.")
 @app_commands.describe(
     dados="Quantos d6 rolar (a reserva).",
-    modificador="Bônus/penalidade de dados (ex.: +2 postura, -1 ferido).",
+    modificador="Bônus/penalidade de DADOS (ex.: +2 postura, -1 ferido).",
+    exitos_bonus="Êxitos AUTOMÁTICOS somados ao resultado (ex.: Supressão de Reino).",
     dificuldade="Nº de êxitos do alvo (opcional — mostra passou/falhou e margem).",
     volatil="A ação é Volátil? Destaca as Dissonâncias.",
     rotulo="Nome da rolagem (ex.: Golpe do Arado).",
@@ -118,54 +183,71 @@ async def rolar_cmd(
     interaction: discord.Interaction,
     dados: app_commands.Range[int, 1, MAX_DADOS],
     modificador: int = 0,
+    exitos_bonus: app_commands.Range[int, -10, 10] = 0,
     dificuldade: app_commands.Range[int, 0, 99] = None,
     volatil: bool = False,
     rotulo: str = None,
 ):
-    base = dados
     pool = max(0, dados + (modificador or 0))
     res = rolar(pool, dificuldade=dificuldade)
-    emb = montar_embed(res, rotulo=rotulo, volatil=volatil,
-                       modificador=modificador or 0, base=base)
+    mods = []
+    if modificador:
+        mods.append(f"{'+' if modificador > 0 else '−'}{abs(modificador)}")
+    if exitos_bonus:
+        mods.append(f"{'+' if exitos_bonus > 0 else '−'}{abs(exitos_bonus)}✦")
+    emb = montar_embed(res, rotulo=rotulo, volatil=volatil, base=dados,
+                       mods=mods, bonus_exitos=exitos_bonus,
+                       dificuldade=dificuldade, autor=interaction.user)
     await interaction.response.send_message(embed=emb)
 
 
 # ─────────────────────────────  comandos de prefixo  ─────────────────────────────
 
-async def _prefixo_rolar(ctx: commands.Context, pool: int, rotulo: str, volatil: bool):
-    if pool < 1:
-        await ctx.reply("Preciso de pelo menos **1** dado. Ex.: `!r 8 Golpe do Arado`")
+USO_R = ("Uso: `!r <dados>[+bônus] [rótulo]`\n"
+         "ex.: `!r 8` · `!r 8+2 Golpe do Arado` · `!r 8+2-1` · `!r 8+1e` (+1 êxito automático)")
+
+
+async def _prefixo_rolar(ctx: commands.Context, args: str, volatil: bool):
+    parsed = parse_expressao(args)
+    if parsed is None:
+        await ctx.reply(USO_R)
         return
+    base, mod_dados, bonus_exitos, mods, rotulo = parsed
+    pool = max(0, base + mod_dados)
     res = rolar(pool)
-    emb = montar_embed(res, rotulo=rotulo or None, volatil=volatil)
+    emb = montar_embed(res, rotulo=rotulo or None, volatil=volatil, base=base,
+                       mods=mods, bonus_exitos=bonus_exitos, autor=ctx.author)
     await ctx.reply(embed=emb)
 
 
 @bot.command(name="r", aliases=["rolar"])
-async def r_cmd(ctx: commands.Context, pool: int = None, *, rotulo: str = ""):
-    """!r <n> [rótulo] — rolagem normal."""
-    if pool is None:
-        await ctx.reply("Uso: `!r <dados> [rótulo]`  ·  ex.: `!r 8 Golpe do Arado`")
-        return
-    await _prefixo_rolar(ctx, pool, rotulo, volatil=False)
+async def r_cmd(ctx: commands.Context, *, args: str = ""):
+    """!r <expressão> [rótulo] — rolagem normal."""
+    await _prefixo_rolar(ctx, args, volatil=False)
 
 
 @bot.command(name="rv", aliases=["rolarv"])
-async def rv_cmd(ctx: commands.Context, pool: int = None, *, rotulo: str = ""):
-    """!rv <n> [rótulo] — rolagem de ação Volátil (destaca Dissonâncias)."""
-    if pool is None:
-        await ctx.reply("Uso: `!rv <dados> [rótulo]`  ·  ex.: `!rv 8 Técnica volátil`")
-        return
-    await _prefixo_rolar(ctx, pool, rotulo, volatil=True)
+async def rv_cmd(ctx: commands.Context, *, args: str = ""):
+    """!rv <expressão> [rótulo] — rolagem de ação Volátil (destaca Dissonâncias)."""
+    await _prefixo_rolar(ctx, args, volatil=True)
 
 
-@r_cmd.error
-@rv_cmd.error
-async def _erro_prefixo(ctx: commands.Context, error):
-    if isinstance(error, commands.BadArgument):
-        await ctx.reply("O número de dados precisa ser inteiro. Ex.: `!r 8 Golpe do Arado`")
-    else:
-        raise error
+@bot.command(name="ajuda", aliases=["help", "comandos"])
+async def ajuda_cmd(ctx: commands.Context):
+    emb = discord.Embed(
+        title="🎲  Comandos do WUX",
+        color=COR_VINHO,
+        description=(
+            "**`!r 8`** — rola 8d6\n"
+            "**`!r 8+2 Golpe do Arado`** — +2 **dados** (postura etc.) e rótulo\n"
+            "**`!r 8+2-1`** — soma e subtrai dados\n"
+            "**`!r 8+1e`** — **+1 êxito automático** (ex.: Supressão de Reino)\n"
+            "**`!rv 8`** — ação **Volátil** (destaca Dissonâncias)\n"
+            "**`/rolar`** — versão completa, com dificuldade (passou/falhou + margem)\n"
+        ),
+    )
+    emb.set_footer(text=RODAPE)
+    await ctx.reply(embed=emb)
 
 
 # ─────────────────────────────  main  ─────────────────────────────
