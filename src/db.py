@@ -6,12 +6,14 @@ import sqlite3
 from typing import Any, Optional
 
 from . import config
+from .rules import level_from_xp, max_hp, max_mp
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns (
     guild_id INTEGER PRIMARY KEY,
     mesa_channel_id INTEGER NOT NULL,
     fichas_channel_id INTEGER NOT NULL,
+    regras_channel_id INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     scene TEXT NOT NULL DEFAULT '',
     last_narrated_id INTEGER NOT NULL DEFAULT 0
@@ -22,12 +24,18 @@ CREATE TABLE IF NOT EXISTS characters (
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     name TEXT NOT NULL,
+    race TEXT NOT NULL DEFAULT 'humano',
+    klass TEXT NOT NULL DEFAULT 'guerreiro',
     forca INTEGER NOT NULL,
     agilidade INTEGER NOT NULL,
     mente INTEGER NOT NULL,
     presenca INTEGER NOT NULL,
     hp INTEGER NOT NULL,
     hp_max INTEGER NOT NULL,
+    mp INTEGER NOT NULL DEFAULT 0,
+    mp_max INTEGER NOT NULL DEFAULT 0,
+    xp INTEGER NOT NULL DEFAULT 0,
+    level INTEGER NOT NULL DEFAULT 1,
     inventory TEXT NOT NULL DEFAULT '[]',
     conditions TEXT NOT NULL DEFAULT '[]',
     sheet_message_id INTEGER,
@@ -44,6 +52,22 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
+# Colunas adicionadas depois da v1 — migradas em bancos antigos
+MIGRATIONS = {
+    "campaigns": {
+        "regras_channel_id": "INTEGER NOT NULL DEFAULT 0",
+        "last_narrated_id": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "characters": {
+        "race": "TEXT NOT NULL DEFAULT 'humano'",
+        "klass": "TEXT NOT NULL DEFAULT 'guerreiro'",
+        "mp": "INTEGER NOT NULL DEFAULT 0",
+        "mp_max": "INTEGER NOT NULL DEFAULT 0",
+        "xp": "INTEGER NOT NULL DEFAULT 0",
+        "level": "INTEGER NOT NULL DEFAULT 1",
+    },
+}
+
 
 class Database:
     """Fonte única da verdade do estado do jogo."""
@@ -57,21 +81,21 @@ class Database:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Migrações leves para bancos criados em versões antigas."""
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(campaigns)")}
-        if "last_narrated_id" not in cols:
-            self.conn.execute(
-                "ALTER TABLE campaigns ADD COLUMN last_narrated_id INTEGER NOT NULL DEFAULT 0"
-            )
-            self.conn.commit()
+        for table, columns in MIGRATIONS.items():
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for column, ddl in columns.items():
+                if column not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        self.conn.commit()
 
     # --- campanha ---
 
-    def setup_campaign(self, guild_id: int, mesa_id: int, fichas_id: int) -> None:
+    def setup_campaign(self, guild_id: int, mesa_id: int, fichas_id: int, regras_id: int = 0) -> None:
         self.conn.execute(
-            "INSERT INTO campaigns (guild_id, mesa_channel_id, fichas_channel_id) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET mesa_channel_id=?, fichas_channel_id=?",
-            (guild_id, mesa_id, fichas_id, mesa_id, fichas_id),
+            "INSERT INTO campaigns (guild_id, mesa_channel_id, fichas_channel_id, regras_channel_id) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET mesa_channel_id=?, fichas_channel_id=?, regras_channel_id=?",
+            (guild_id, mesa_id, fichas_id, regras_id, mesa_id, fichas_id, regras_id),
         )
         self.conn.commit()
 
@@ -97,13 +121,17 @@ class Database:
     # --- personagens ---
 
     def create_character(
-        self, guild_id: int, user_id: int, name: str,
-        forca: int, agilidade: int, mente: int, presenca: int, hp_max: int,
+        self, guild_id: int, user_id: int, name: str, race: str, klass: str,
+        forca: int, agilidade: int, mente: int, presenca: int,
+        hp_max: int, mp_max: int,
     ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO characters (guild_id, user_id, name, forca, agilidade, mente, presenca, hp, hp_max) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, user_id, name, forca, agilidade, mente, presenca, hp_max, hp_max),
+            "INSERT INTO characters "
+            "(guild_id, user_id, name, race, klass, forca, agilidade, mente, presenca, "
+            " hp, hp_max, mp, mp_max) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, user_id, name, race, klass, forca, agilidade, mente, presenca,
+             hp_max, hp_max, mp_max, mp_max),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -130,6 +158,28 @@ class Database:
         )
         self.conn.commit()
 
+    def grant_xp(self, char_id: int, amount: int) -> tuple[int, int]:
+        """Soma XP e sobe de nível se preciso. Retorna (nível_antes, nível_depois)."""
+        row = self.conn.execute("SELECT * FROM characters WHERE id=?", (char_id,)).fetchone()
+        if row is None:
+            return (1, 1)
+        before = row["level"]
+        xp = max(0, row["xp"] + amount)
+        after = level_from_xp(xp)
+
+        hp_max = max_hp(row["forca"], row["race"], row["klass"], after)
+        mp_max = max_mp(row["mente"], row["race"], row["klass"], after)
+        # Subir de nível cura a diferença (o ganho vem "cheio")
+        hp = min(hp_max, row["hp"] + max(0, hp_max - row["hp_max"]))
+        mp = min(mp_max, row["mp"] + max(0, mp_max - row["mp_max"]))
+
+        self.conn.execute(
+            "UPDATE characters SET xp=?, level=?, hp=?, hp_max=?, mp=?, mp_max=? WHERE id=?",
+            (xp, after, hp, hp_max, mp, mp_max, char_id),
+        )
+        self.conn.commit()
+        return (before, after)
+
     def apply_delta(self, char_id: int, delta: dict[str, Any]) -> None:
         """Aplica um delta validado do Escriba. Só campos permitidos, com clamps."""
         row = self.conn.execute("SELECT * FROM characters WHERE id=?", (char_id,)).fetchone()
@@ -140,6 +190,11 @@ class Database:
         hp_change = delta.get("hp_change", 0)
         if isinstance(hp_change, int):
             hp = max(0, min(row["hp_max"], hp + hp_change))
+
+        mp = row["mp"]
+        mp_change = delta.get("mp_change", 0)
+        if isinstance(mp_change, int):
+            mp = max(0, min(row["mp_max"], mp + mp_change))
 
         inventory = json.loads(row["inventory"])
         for item in delta.get("items_added", []) or []:
@@ -159,8 +214,8 @@ class Database:
 
         alive = 0 if hp <= 0 else row["alive"]
         self.conn.execute(
-            "UPDATE characters SET hp=?, inventory=?, conditions=?, alive=? WHERE id=?",
-            (hp, json.dumps(inventory, ensure_ascii=False),
+            "UPDATE characters SET hp=?, mp=?, inventory=?, conditions=?, alive=? WHERE id=?",
+            (hp, mp, json.dumps(inventory, ensure_ascii=False),
              json.dumps(conditions, ensure_ascii=False), alive, char_id),
         )
         self.conn.commit()
