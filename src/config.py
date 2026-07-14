@@ -9,8 +9,8 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-MODEL_NARRATOR = os.getenv("MODEL_NARRATOR", "tencent/hy3:free")
-MODEL_UTILITY = os.getenv("MODEL_UTILITY", "tencent/hy3:free")
+MODEL_NARRATOR = os.getenv("MODEL_NARRATOR", "deepseek/deepseek-v4-pro")
+MODEL_UTILITY = os.getenv("MODEL_UTILITY", "deepseek/deepseek-v4-pro")
 
 DB_PATH = os.getenv("DB_PATH", "./data/ddr.db")
 
