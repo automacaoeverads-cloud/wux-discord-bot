@@ -26,8 +26,21 @@ ATTR_MIN = -1
 ATTR_MAX = 3
 ATTR_SUM_MAX = 5
 
-XP_PER_LEVEL = 100
 MAX_LEVEL = 10
+
+# XP TOTAL acumulado necessário para estar em cada nível (progressão crescente)
+XP_TABLE = {
+    1: 0,
+    2: 100,
+    3: 250,
+    4: 450,
+    5: 700,
+    6: 1000,
+    7: 1400,
+    8: 1900,
+    9: 2500,
+    10: 3200,
+}
 
 
 # ───────────────────────────────  Raças  ───────────────────────────────
@@ -114,10 +127,75 @@ CLASSES: dict[str, dict] = {
 }
 
 
+# ────────────────────────  Árvore de habilidades  ──────────────────────
+# Cada classe desbloqueia uma habilidade nos níveis 1, 3 e 5.
+# custo_mp = None → habilidade física/passiva, sem custo de magia.
+
+ABILITIES: dict[str, list[dict]] = {
+    "guerreiro": [
+        {"level": 1, "name": "Golpe Poderoso", "mp": None,
+         "desc": "1×/combate, declare antes de atacar: se acertar, o dano é devastador."},
+        {"level": 3, "name": "Grito de Guerra", "mp": 2,
+         "desc": "Inimigos próximos vacilam; aliados ganham coragem na próxima ação."},
+        {"level": 5, "name": "Fúria do Campeão", "mp": 4,
+         "desc": "Por uma cena, ignora dor e ataca como um turbilhão. Ao final, exausto."},
+    ],
+    "ladino": [
+        {"level": 1, "name": "Ataque Furtivo", "mp": None,
+         "desc": "Atacando sem ser visto ou um alvo distraído, o golpe fere muito mais fundo."},
+        {"level": 3, "name": "Truque de Sombras", "mp": 2,
+         "desc": "Desaparece de vista por instantes — reposiciona-se ou some da cena."},
+        {"level": 5, "name": "Golpe Fatal", "mp": 4,
+         "desc": "1×/combate, contra alvo ferido: tenta encerrar a luta com um único golpe preciso."},
+    ],
+    "mago": [
+        {"level": 1, "name": "Dardo Arcano", "mp": 1,
+         "desc": "Projétil de pura energia que raramente erra o alvo."},
+        {"level": 3, "name": "Bola de Fogo", "mp": 3,
+         "desc": "Explosão flamejante que atinge uma área inteira."},
+        {"level": 5, "name": "Tempestade Arcana", "mp": 5,
+         "desc": "Relâmpagos e força bruta varrem o campo — devastador, mas exaure."},
+    ],
+    "clerigo": [
+        {"level": 1, "name": "Toque Curativo", "mp": 2,
+         "desc": "Fecha ferimentos com a imposição das mãos (cura moderada)."},
+        {"level": 3, "name": "Expulsar Mortos-Vivos", "mp": 3,
+         "desc": "A luz divina força mortos-vivos a recuar ou fugir."},
+        {"level": 5, "name": "Círculo de Proteção", "mp": 5,
+         "desc": "Barreira sagrada que protege o grupo por uma cena."},
+    ],
+    "patrulheiro": [
+        {"level": 1, "name": "Tiro Certeiro", "mp": None,
+         "desc": "Mirando com calma, o disparo encontra brechas na defesa."},
+        {"level": 3, "name": "Companheiro Animal", "mp": None,
+         "desc": "Um animal leal (lobo, falcão...) ajuda a rastrear, vigiar e lutar."},
+        {"level": 5, "name": "Chuva de Flechas", "mp": 4,
+         "desc": "Uma saraivada cobre a área e atinge vários inimigos."},
+    ],
+    "bardo": [
+        {"level": 1, "name": "Canção Inspiradora", "mp": 1,
+         "desc": "Sua música dá a um aliado confiança para a próxima ação."},
+        {"level": 3, "name": "Zombaria Cruel", "mp": 2,
+         "desc": "Palavras afiadas distraem e enfurecem um inimigo, que baixa a guarda."},
+        {"level": 5, "name": "Acorde Hipnótico", "mp": 4,
+         "desc": "Uma melodia que prende a atenção de todos que a ouvem por instantes."},
+    ],
+}
+
+
+def abilities_for(klass: str, level: int) -> list[dict]:
+    """Habilidades já desbloqueadas por um personagem dessa classe/nível."""
+    return [a for a in ABILITIES.get(klass, []) if a["level"] <= level]
+
+
 # ──────────────────────────────  Fórmulas  ─────────────────────────────
 
 def level_from_xp(xp: int) -> int:
-    return max(1, min(MAX_LEVEL, 1 + int(xp) // XP_PER_LEVEL))
+    level = 1
+    for lvl, needed in XP_TABLE.items():
+        if int(xp) >= needed:
+            level = lvl
+    return level
 
 
 def xp_to_next(xp: int) -> int | None:
@@ -125,7 +203,7 @@ def xp_to_next(xp: int) -> int | None:
     level = level_from_xp(xp)
     if level >= MAX_LEVEL:
         return None
-    return level * XP_PER_LEVEL - int(xp)
+    return XP_TABLE[level + 1] - int(xp)
 
 
 def max_hp(forca: int, race: str, klass: str, level: int = 1) -> int:
