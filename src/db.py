@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     mesa_channel_id INTEGER NOT NULL,
     fichas_channel_id INTEGER NOT NULL,
     regras_channel_id INTEGER NOT NULL DEFAULT 0,
+    off_channel_id INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     scene TEXT NOT NULL DEFAULT '',
     last_narrated_id INTEGER NOT NULL DEFAULT 0
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS events (
 MIGRATIONS = {
     "campaigns": {
         "regras_channel_id": "INTEGER NOT NULL DEFAULT 0",
+        "off_channel_id": "INTEGER NOT NULL DEFAULT 0",
         "last_narrated_id": "INTEGER NOT NULL DEFAULT 0",
     },
     "characters": {
@@ -90,12 +92,18 @@ class Database:
 
     # --- campanha ---
 
-    def setup_campaign(self, guild_id: int, mesa_id: int, fichas_id: int, regras_id: int = 0) -> None:
+    def setup_campaign(
+        self, guild_id: int, mesa_id: int, fichas_id: int,
+        regras_id: int = 0, off_id: int = 0,
+    ) -> None:
         self.conn.execute(
-            "INSERT INTO campaigns (guild_id, mesa_channel_id, fichas_channel_id, regras_channel_id) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET mesa_channel_id=?, fichas_channel_id=?, regras_channel_id=?",
-            (guild_id, mesa_id, fichas_id, regras_id, mesa_id, fichas_id, regras_id),
+            "INSERT INTO campaigns "
+            "(guild_id, mesa_channel_id, fichas_channel_id, regras_channel_id, off_channel_id) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET mesa_channel_id=?, fichas_channel_id=?, "
+            "regras_channel_id=?, off_channel_id=?",
+            (guild_id, mesa_id, fichas_id, regras_id, off_id,
+             mesa_id, fichas_id, regras_id, off_id),
         )
         self.conn.commit()
 
