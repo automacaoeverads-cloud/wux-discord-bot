@@ -12,7 +12,7 @@ from . import config, rulebook
 from .db import Database
 from .orchestrator import Orchestrator
 from .rules import (
-    ATTR_LABELS, CLASSES, MAX_LEVEL, RACES, apply_race_bonus,
+    ATTR_LABELS, CLASSES, MAX_LEVEL, RACES, abilities_for, apply_race_bonus,
     max_hp, max_mp, validate_attributes, xp_to_next,
 )
 
@@ -116,6 +116,17 @@ def sheet_embed(row: sqlite3.Row) -> discord.Embed:
         inline=False,
     )
 
+    skills = abilities_for(row["klass"], row["level"])
+    if skills:
+        embed.add_field(
+            name="🌟 Habilidades",
+            value="\n".join(
+                f"• **{a['name']}**" + (f" `{a['mp']} MP`" if a["mp"] else "")
+                for a in skills
+            ),
+            inline=False,
+        )
+
     inventory = json.loads(row["inventory"])
     embed.add_field(
         name="🎒 Inventário",
@@ -197,6 +208,11 @@ async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -
             "📜-fichas", category=category, overwrites=somente_leitura,
             topic="Fichas dos personagens — mantidas pelo bot.",
         )
+        off = await guild.create_text_channel(
+            "💬-off-topic", category=category,
+            topic="Papo fora do jogo. O Mestre posta aqui as sugestões de XP "
+                  "ao fim de combates e missões.",
+        )
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ Preciso da permissão **Gerenciar Canais** para criar a mesa. "
@@ -205,7 +221,7 @@ async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -
         )
         return
 
-    bot.db.setup_campaign(guild.id, mesa.id, fichas.id, regras.id)
+    bot.db.setup_campaign(guild.id, mesa.id, fichas.id, regras.id, off.id)
     bot.db.set_last_narrated(guild.id, 0)
 
     # O livro de regras da mesa
@@ -227,7 +243,8 @@ async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -
         ),
     ))
     await interaction.followup.send(
-        f"✅ Mesa criada! **🎲 {nome}** — {regras.mention} · {mesa.mention} · {fichas.mention}",
+        f"✅ Mesa criada! **🎲 {nome}** — {regras.mention} · {mesa.mention} · "
+        f"{fichas.mention} · {off.mention}",
         ephemeral=True,
     )
 
@@ -465,6 +482,25 @@ async def narrar(interaction: discord.Interaction) -> None:
 
     for row in outcome.updated_rows:
         await refresh_sheet(guild, row)
+
+    # marco concluído? sugestão de XP vai para o off-topic (o mestre decide com /xp)
+    if outcome.reward:
+        off = guild.get_channel(campaign["off_channel_id"])
+        if off is not None:
+            linhas = "\n".join(
+                f"• **{a['character']}** — `{a['xp']} XP` — {a['reason']}"
+                for a in outcome.reward["awards"]
+            )
+            sugestao = discord.Embed(
+                title=f"✨ Marco: {outcome.reward['title']}",
+                color=discord.Color.gold(),
+                description=(
+                    f"{linhas}\n\n"
+                    f"-# Sugestão do Mestre-IA. Quem decide é o mestre da mesa, "
+                    f"com `/xp jogador quantidade`."
+                ),
+            )
+            await off.send(embed=sugestao)
 
     if interaction.channel_id != campaign["mesa_channel_id"]:
         await interaction.followup.send(f"✅ Narração publicada em {mesa.mention}.")
