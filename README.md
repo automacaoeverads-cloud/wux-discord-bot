@@ -48,6 +48,24 @@ Princípios:
 - **Dados rolados por código** — a IA nunca decide o resultado de um teste.
 - **Cada agente faz uma coisa só** e retorna JSON validado com defaults seguros.
 - **Narrador recebe os resultados como fatos** e não pode contradizê-los.
+- **O Mestre nunca controla os PJs** e **NPCs não são oniscientes** (ver abaixo).
+
+## Convenções de escrita na mesa
+
+O `parsing.py` separa cada mensagem antes de qualquer IA ver:
+
+| Você escreve | É lido como | Quem percebe |
+|---|---|---|
+| `**abro a porta**` | **AÇÃO** | NPCs **veem** |
+| `-- Tem alguém aí?` | **FALA** | NPCs **ouvem** (só quem está perto) |
+| `"não confio nele"` | **PENSAMENTO** | **ninguém** — é privado |
+
+Texto sem marcação = ação.
+
+**Por que isso importa:** o pensamento nunca chega aos NPCs *nem entra no histórico
+da campanha* — um NPC não pode "lembrar" de algo que ninguém disse. O Narrador é
+instruído a nunca escrever ações/falas/emoções dos PJs, e a só deixar um NPC saber
+o que ele viu ou ouviu.
 
 Modelos padrão (troque via env, sem mexer no código):
 
@@ -65,22 +83,34 @@ Modelos padrão (troque via env, sem mexer no código):
 ## Sistema de regras
 
 - Cenário: fantasia medieval clássica
-- 4 atributos: **Força, Agilidade, Mente, Presença** (-1 a +3, soma máx. 5)
+- 4 atributos: **Força, Agilidade, Mente, Presença** (-1 a +3 na criação, soma máx. 5)
+- **Raça** dá +1 num atributo (pode chegar a +4); **classe** define HP e MP
 - Teste: **d20 + atributo vs CD** (fácil 10, médio 14, difícil 18)
 - 20 natural = crítico, 1 natural = desastre
-- HP = 10 + 2×Força
+- **HP** = 10 + 2×Força + bônus de raça/classe + 2 por nível
+- **MP** = base da classe + Mente + bônus de raça + 1 por nível
+- **XP** = 100 por nível (até o 10º), concedido pelo mestre com `/xp`
+
+**Raças:** Humano, Elfo, Anão, Halfling, Orc, Gnomo, Tiefling
+**Classes:** Guerreiro, Ladino, Mago, Clérigo, Patrulheiro, Bardo
+
+*(definidos em `rules.py` — o bot publica a tabela completa no canal `📖-regras`)*
 
 ## Comandos
 
 | Comando | O que faz |
 |---|---|
-| `/iniciar [nome]` | **Cria a mesa inteira**: categoria + canais (precisa de Gerenciar Canais) |
-| `/criar_ficha` | Cria seu personagem |
+| `/iniciar [nome]` | **Cria a mesa inteira**: categoria + `📖-regras`, `🎭-mesa`, `📜-fichas` (precisa de Gerenciar Canais) |
+| `/criar_ficha` | Cria seu personagem (nome, raça, classe, atributos) |
 | `/ficha` | Mostra sua ficha (privado) |
 | `/apagar_ficha` | Apaga seu personagem |
 | `/cena descricao` | Abre uma nova cena |
 | `/narrar` | O Mestre lê a mesa desde a última narração e responde |
+| `/xp jogador quantidade` | Concede XP (mestre da mesa) |
 | `/historia` | Resumo da campanha até aqui |
+
+O `/iniciar` publica automaticamente no `📖-regras` o livro da mesa: sistema, raças,
+classes, as convenções de escrita e o que o Mestre pode/não pode fazer.
 
 ## Permissões necessárias do bot
 
