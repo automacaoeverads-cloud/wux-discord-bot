@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Espelho público do Docker Hub (evita 429 Too Many Requests em VPS)
+FROM public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 
