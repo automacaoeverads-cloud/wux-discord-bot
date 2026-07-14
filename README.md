@@ -1,39 +1,60 @@
 # DDR — RPG de mesa narrado por IA no Discord
 
-Bot que mestra RPG de mesa em um canal do Discord, com fichas atualizadas
-automaticamente em outro canal. Usa múltiplos agentes de IA via
-[OpenRouter](https://openrouter.ai), coordenados por código determinístico
-para evitar alucinações.
+Bot que mestra um RPG de **fantasia medieval** direto no Discord. Os jogadores
+**conversam livremente no canal da mesa** como seus personagens; quando querem a
+resposta do Mestre, alguém usa `/narrar` — o bot lê tudo que foi dito desde a
+última narração, separa por personagem, decide os testes, rola os dados e narra.
+Fichas ficam num canal próprio, atualizadas automaticamente.
+
+Usa múltiplos agentes de IA via [OpenRouter](https://openrouter.ai), coordenados
+por código determinístico para evitar alucinações.
+
+## O fluxo de jogo
+
+```
+/iniciar  ──► cria a categoria 🎲 com #🎭-mesa e #📜-fichas
+/criar_ficha ──► ficha publicada em #📜-fichas
+/cena     ──► o Narrador abre a cena em #🎭-mesa
+
+jogadores digitam à vontade em #🎭-mesa (RP livre)
+  · mensagens com //, ( ou [ no início = fora do jogo (ignoradas)
+
+/narrar   ──► o bot coleta o que cada personagem disse/fez e responde
+```
 
 ## Arquitetura anti-alucinação
 
 ```
-Jogador usa /acao
-      │
+/narrar
+      │  código coleta o chat desde a última narração e separa por personagem
       ▼
 ┌─────────────────── ORQUESTRADOR (código, não IA) ───────────────────┐
 │                                                                     │
-│  1. ÁRBITRO (qwen) ─── decide SE rola dado, atributo e CD (JSON)    │
-│  2. CÓDIGO ──────────── rola o d20; resultado vira fato imutável    │
-│  3. NARRADOR (deepseek) escreve a prosa a partir do fato            │
-│  4. ESCRIBA (qwen) ──── extrai deltas de ficha (JSON validado)      │
+│  1. ÁRBITRO ─────────── decide QUEM rola dado, atributo e CD (JSON) │
+│  2. CÓDIGO ──────────── rola os d20; resultados viram fatos         │
+│  3. NARRADOR ────────── escreve a prosa a partir dos fatos          │
+│  4. ESCRIBA ─────────── extrai deltas de ficha por personagem       │
 │  5. CÓDIGO ──────────── aplica deltas no SQLite com limites         │
-│  6. CRONISTA (qwen) ─── compacta o histórico quando cresce          │
+│  6. CRONISTA ────────── compacta o histórico quando cresce          │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
       │
       ▼
-Narração no canal da mesa + ficha atualizada no canal de fichas
+Narração + testes + fichas atualizadas
 ```
 
 Princípios:
 - **SQLite é a fonte única da verdade** — a IA nunca "lembra" estado, sempre recebe do banco.
 - **Dados rolados por código** — a IA nunca decide o resultado de um teste.
 - **Cada agente faz uma coisa só** e retorna JSON validado com defaults seguros.
-- **Narrador recebe o resultado como fato** e não pode contradizê-lo.
+- **Narrador recebe os resultados como fatos** e não pode contradizê-los.
+
+Modelo padrão de todos os agentes: `tencent/hy3:free` (troque via env
+`MODEL_NARRATOR` / `MODEL_UTILITY`).
 
 ## Sistema de regras
 
+- Cenário: fantasia medieval clássica
 - 4 atributos: **Força, Agilidade, Mente, Presença** (-1 a +3, soma máx. 5)
 - Teste: **d20 + atributo vs CD** (fácil 10, médio 14, difícil 18)
 - 20 natural = crítico, 1 natural = desastre
@@ -43,13 +64,19 @@ Princípios:
 
 | Comando | O que faz |
 |---|---|
-| `/iniciar mesa fichas` | Configura os canais da campanha |
+| `/iniciar [nome]` | **Cria a mesa inteira**: categoria + canais (precisa de Gerenciar Canais) |
 | `/criar_ficha` | Cria seu personagem |
 | `/ficha` | Mostra sua ficha (privado) |
 | `/apagar_ficha` | Apaga seu personagem |
 | `/cena descricao` | Abre uma nova cena |
-| `/acao descricao` | Declara o que seu personagem faz |
+| `/narrar` | O Mestre lê a mesa desde a última narração e responde |
 | `/historia` | Resumo da campanha até aqui |
+
+## Permissões necessárias do bot
+
+- **Gerenciar Canais** (para o `/iniciar` criar a categoria e os canais)
+- Ver Canal, Enviar Mensagens, Inserir Links (embeds), **Ler Histórico de Mensagens**
+- **Message Content Intent** ligada no Developer Portal (para ler o chat da mesa)
 
 ## Rodando local
 
