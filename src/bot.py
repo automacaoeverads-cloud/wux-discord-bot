@@ -32,8 +32,32 @@ class DDRBot(discord.Client):
         self.orch = Orchestrator(self.db)
 
     async def setup_hook(self) -> None:
+        self.tree.on_error = on_app_command_error
         await self.tree.sync()
         log.info("Comandos sincronizados.")
+
+
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+) -> None:
+    """Nenhum comando morre com traceback cru — o jogador sempre recebe resposta."""
+    original = getattr(error, "original", error)
+
+    # Interação expirada (bot demorou > 3s para o defer): não dá para responder.
+    if isinstance(original, discord.NotFound) and original.code == 10062:
+        log.warning("Interação expirou antes do defer (%s).", interaction.command)
+        return
+
+    log.exception("Erro no comando %s", interaction.command, exc_info=original)
+    msg = f"❌ Algo deu errado: `{original}`"
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 bot = DDRBot()
@@ -96,11 +120,12 @@ def _require_campaign(interaction: discord.Interaction) -> Optional[sqlite3.Row]
 @app_commands.describe(nome="Nome da mesa/campanha (padrão: Mesa de RPG)")
 @app_commands.default_permissions(manage_guild=True)
 async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -> None:
+    # defer PRIMEIRO: o Discord invalida a interação se não responder em 3s
+    await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     if guild is None:
-        await interaction.response.send_message("⚠️ Use dentro de um servidor.", ephemeral=True)
+        await interaction.followup.send("⚠️ Use dentro de um servidor.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
 
     nome = nome.strip()[:80] or "Mesa de RPG"
     me = guild.me
@@ -215,11 +240,11 @@ async def apagar_ficha(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="cena", description="Abre uma nova cena (o Narrador descreve)")
 @app_commands.describe(descricao="Descreva onde o grupo está e o que está acontecendo")
 async def cena(interaction: discord.Interaction, descricao: str) -> None:
+    await interaction.response.defer()
     campaign = _require_campaign(interaction)
     if campaign is None:
-        await interaction.response.send_message("⚠️ Rode `/iniciar` primeiro.", ephemeral=True)
+        await interaction.followup.send("⚠️ Rode `/iniciar` primeiro.", ephemeral=True)
         return
-    await interaction.response.defer()
     try:
         narration = await bot.orch.open_scene(interaction.guild.id, descricao)
     except Exception as e:  # noqa: BLE001
@@ -264,17 +289,18 @@ def _coletar_acoes(
     description="O Mestre lê tudo que foi dito na mesa desde a última narração e responde",
 )
 async def narrar(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
     campaign = _require_campaign(interaction)
     if campaign is None:
-        await interaction.response.send_message("⚠️ Rode `/iniciar` primeiro.", ephemeral=True)
+        await interaction.followup.send("⚠️ Rode `/iniciar` primeiro.", ephemeral=True)
         return
     guild = interaction.guild
     mesa = guild.get_channel(campaign["mesa_channel_id"])
     if mesa is None:
-        await interaction.response.send_message("⚠️ Canal da mesa não encontrado. Rode `/iniciar` de novo.", ephemeral=True)
+        await interaction.followup.send(
+            "⚠️ Canal da mesa não encontrado. Rode `/iniciar` de novo.", ephemeral=True
+        )
         return
-
-    await interaction.response.defer()
 
     # coleta as mensagens desde o checkpoint
     last_id = campaign["last_narrated_id"]
