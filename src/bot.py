@@ -8,10 +8,13 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from . import config
+from . import config, rulebook
 from .db import Database
 from .orchestrator import Orchestrator
-from .rules import ATTR_LABELS, max_hp, validate_attributes
+from .rules import (
+    ATTR_LABELS, CLASSES, MAX_LEVEL, RACES, apply_race_bonus,
+    max_hp, max_mp, validate_attributes, xp_to_next,
+)
 
 log = logging.getLogger("ddr.bot")
 
@@ -20,8 +23,8 @@ intents.message_content = True  # necessário para ler o chat da mesa no /narrar
 
 # Mensagens da mesa que começam assim são off-game e ficam fora da narração
 OOC_PREFIXES = ("//", "(", "[")
-MAX_BEAT_MESSAGES = 60      # teto de mensagens processadas por /narrar
-MAX_MESSAGE_CHARS = 400     # teto de tamanho por mensagem
+MAX_BEAT_MESSAGES = 60
+MAX_MESSAGE_CHARS = 600
 
 
 class DDRBot(discord.Client):
@@ -43,12 +46,9 @@ async def on_app_command_error(
 ) -> None:
     """Nenhum comando morre com traceback cru — o jogador sempre recebe resposta."""
     original = getattr(error, "original", error)
-
-    # Interação expirada (bot demorou > 3s para o defer): não dá para responder.
     if isinstance(original, discord.NotFound) and original.code == 10062:
         log.warning("Interação expirou antes do defer (%s).", interaction.command)
         return
-
     log.exception("Erro no comando %s", interaction.command, exc_info=original)
     msg = f"❌ Algo deu errado: `{original}`"
     try:
@@ -63,24 +63,74 @@ async def on_app_command_error(
 bot = DDRBot()
 
 
+# ─────────────────────────────  ficha  ─────────────────────────────
+
+def _barra(atual: int, total: int, tamanho: int = 10) -> str:
+    if total <= 0:
+        return "─" * tamanho
+    cheio = max(0, min(tamanho, round(atual / total * tamanho)))
+    return "█" * cheio + "░" * (tamanho - cheio)
+
+
 def sheet_embed(row: sqlite3.Row) -> discord.Embed:
-    color = discord.Color.green() if row["alive"] else discord.Color.dark_red()
-    embed = discord.Embed(title=f"📜 {row['name']}", color=color)
-    embed.add_field(name="HP", value=f"{row['hp']} / {row['hp_max']}", inline=True)
-    attrs = "\n".join(
-        f"**{ATTR_LABELS[a]}**: {row[a]:+d}"
-        for a in ("forca", "agilidade", "mente", "presenca")
+    race = RACES.get(row["race"], {}).get("label", row["race"])
+    klass = CLASSES.get(row["klass"], {}).get("label", row["klass"])
+
+    if not row["alive"]:
+        color = discord.Color.dark_red()
+    elif row["hp"] <= row["hp_max"] // 4:
+        color = discord.Color.red()
+    elif row["hp"] <= row["hp_max"] // 2:
+        color = discord.Color.orange()
+    else:
+        color = discord.Color.green()
+
+    embed = discord.Embed(
+        title=f"📜 {row['name']}",
+        description=f"**{race} {klass}** · Nível **{row['level']}**",
+        color=color,
     )
-    embed.add_field(name="Atributos", value=attrs, inline=True)
+
+    embed.add_field(
+        name="❤️ Vida",
+        value=f"`{_barra(row['hp'], row['hp_max'])}`\n**{row['hp']}** / {row['hp_max']} HP",
+        inline=True,
+    )
+    embed.add_field(
+        name="🔮 Magia",
+        value=f"`{_barra(row['mp'], row['mp_max'])}`\n**{row['mp']}** / {row['mp_max']} MP",
+        inline=True,
+    )
+
+    falta = xp_to_next(row["xp"])
+    xp_txt = f"**{row['xp']}** XP\n"
+    xp_txt += f"-# faltam {falta} p/ o nível {row['level'] + 1}" if falta else f"-# nível máximo ({MAX_LEVEL})"
+    embed.add_field(name="✨ Experiência", value=xp_txt, inline=True)
+
+    embed.add_field(
+        name="💪 Atributos",
+        value="  ".join(
+            f"**{ATTR_LABELS[a][:3]}** `{row[a]:+d}`"
+            for a in ("forca", "agilidade", "mente", "presenca")
+        ),
+        inline=False,
+    )
+
     inventory = json.loads(row["inventory"])
+    embed.add_field(
+        name="🎒 Inventário",
+        value="\n".join(f"• {i}" for i in inventory) or "*vazio*",
+        inline=True,
+    )
     conditions = json.loads(row["conditions"])
     embed.add_field(
-        name="Inventário", value="\n".join(f"• {i}" for i in inventory) or "*vazio*", inline=False
+        name="🌀 Condições",
+        value="\n".join(f"• {c}" for c in conditions) or "*nenhuma*",
+        inline=True,
     )
-    if conditions:
-        embed.add_field(name="Condições", value=", ".join(conditions), inline=False)
+
     if not row["alive"]:
-        embed.set_footer(text="☠️ Caído")
+        embed.set_footer(text="☠️ Caído — precisa de ajuda urgente")
     return embed
 
 
@@ -115,12 +165,11 @@ def _require_campaign(interaction: discord.Interaction) -> Optional[sqlite3.Row]
 
 @bot.tree.command(
     name="iniciar",
-    description="Cria a mesa: categoria + canais de narração e fichas, tudo automático",
+    description="Cria a mesa: categoria + canais de regras, jogo e fichas",
 )
 @app_commands.describe(nome="Nome da mesa/campanha (padrão: Mesa de RPG)")
 @app_commands.default_permissions(manage_guild=True)
 async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -> None:
-    # defer PRIMEIRO: o Discord invalida a interação se não responder em 3s
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     if guild is None:
@@ -129,90 +178,141 @@ async def iniciar(interaction: discord.Interaction, nome: str = "Mesa de RPG") -
 
     nome = nome.strip()[:80] or "Mesa de RPG"
     me = guild.me
+    somente_leitura = {
+        guild.default_role: discord.PermissionOverwrite(send_messages=False),
+        me: discord.PermissionOverwrite(send_messages=True),
+    }
     try:
         category = await guild.create_category(f"🎲 {nome}")
+        regras = await guild.create_text_channel(
+            "📖-regras", category=category, overwrites=somente_leitura,
+            topic="Como funciona o sistema, as raças, as classes e como escrever na mesa.",
+        )
         mesa = await guild.create_text_channel(
             "🎭-mesa", category=category,
-            topic="A mesa de jogo: fale como seu personagem. // ou ( ) = fora do jogo. "
-                  "Use /narrar quando quiserem a resposta do Mestre.",
+            topic="Escreva como seu personagem: **ação** · -- fala · \"pensamento\". "
+                  "Use /narrar para o Mestre responder.",
         )
         fichas = await guild.create_text_channel(
-            "📜-fichas", category=category,
+            "📜-fichas", category=category, overwrites=somente_leitura,
             topic="Fichas dos personagens — mantidas pelo bot.",
-            overwrites={
-                guild.default_role: discord.PermissionOverwrite(send_messages=False),
-                me: discord.PermissionOverwrite(send_messages=True),
-            },
         )
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ Preciso da permissão **Gerenciar Canais** para criar a mesa. "
-            "Dê a permissão ao bot (ou reconvide com o link de convite atualizado) e rode `/iniciar` de novo.",
+            "Dê a permissão ao bot e rode `/iniciar` de novo.",
             ephemeral=True,
         )
         return
 
-    bot.db.setup_campaign(guild.id, mesa.id, fichas.id)
+    bot.db.setup_campaign(guild.id, mesa.id, fichas.id, regras.id)
     bot.db.set_last_narrated(guild.id, 0)
+
+    # O livro de regras da mesa
+    for embed in rulebook.all_embeds():
+        await regras.send(embed=embed)
 
     await mesa.send(embed=discord.Embed(
         title=f"🎲 {nome}",
         color=discord.Color.purple(),
         description=(
-            "Bem-vindos à mesa! **Fantasia medieval** — reinos, masmorras e magia.\n\n"
-            "**Como jogar:**\n"
-            "1. Crie seu personagem com `/criar_ficha` (ela aparece em 📜-fichas)\n"
-            "2. Abram uma cena com `/cena`\n"
-            "3. **Conversem e ajam neste canal**, como seus personagens\n"
-            "4. Quando quiserem a resposta do Mestre, usem `/narrar`\n\n"
-            "-# Mensagens começando com `//`, `(` ou `[` são fora do jogo e o Mestre ignora."
+            f"A mesa está posta. Leiam as regras em {regras.mention}.\n\n"
+            "**Comecem assim:**\n"
+            "1. `/criar_ficha` — escolham raça, classe e atributos\n"
+            "2. `/cena` — alguém abre a primeira cena\n"
+            "3. **Escrevam aqui como seus personagens:**\n"
+            "> `**ação**` · `-- fala` · `\"pensamento\"`\n"
+            "4. `/narrar` — quando quiserem a resposta do Mestre\n\n"
+            "-# Pensamentos são privados: nenhum NPC os escuta."
         ),
     ))
     await interaction.followup.send(
-        f"✅ Mesa criada! Categoria **🎲 {nome}** com {mesa.mention} e {fichas.mention}.",
+        f"✅ Mesa criada! **🎲 {nome}** — {regras.mention} · {mesa.mention} · {fichas.mention}",
         ephemeral=True,
     )
 
 
 # ─────────────────────────────  fichas  ─────────────────────────────
 
+RACE_CHOICES = [
+    app_commands.Choice(name=data["label"], value=key) for key, data in RACES.items()
+]
+CLASS_CHOICES = [
+    app_commands.Choice(name=data["label"], value=key) for key, data in CLASSES.items()
+]
+ATTR_CHOICES = [
+    app_commands.Choice(name=label, value=key) for key, label in ATTR_LABELS.items()
+]
+
+
 @bot.tree.command(name="criar_ficha", description="Cria seu personagem (atributos de -1 a +3, soma máx. 5)")
 @app_commands.describe(
     nome="Nome do personagem",
-    forca="Força (-1 a +3) — HP = 10 + 2×Força",
+    raca="Sua raça (dá +1 num atributo)",
+    classe="Sua classe (define HP e MP)",
+    forca="Força (-1 a +3)",
     agilidade="Agilidade (-1 a +3)",
     mente="Mente (-1 a +3)",
     presenca="Presença (-1 a +3)",
+    bonus_humano="Só para Humanos: em qual atributo cai o +1 racial",
 )
+@app_commands.choices(raca=RACE_CHOICES, classe=CLASS_CHOICES, bonus_humano=ATTR_CHOICES)
 async def criar_ficha(
     interaction: discord.Interaction,
     nome: str,
+    raca: app_commands.Choice[str],
+    classe: app_commands.Choice[str],
     forca: int,
     agilidade: int,
     mente: int,
     presenca: int,
+    bonus_humano: Optional[app_commands.Choice[str]] = None,
 ) -> None:
     campaign = _require_campaign(interaction)
     if campaign is None:
         await interaction.response.send_message("⚠️ Rode `/iniciar` primeiro.", ephemeral=True)
         return
+
     error = validate_attributes(forca, agilidade, mente, presenca)
     if error:
         await interaction.response.send_message(f"⚠️ {error}", ephemeral=True)
         return
+
+    race_key = raca.value
+    if RACES[race_key]["attr"] is None and bonus_humano is None:
+        await interaction.response.send_message(
+            f"⚠️ **{raca.name}** escolhe onde cai o +1 racial — "
+            f"informe também o parâmetro `bonus_humano`.",
+            ephemeral=True,
+        )
+        return
+
     if bot.db.get_character(interaction.guild.id, interaction.user.id):
         await interaction.response.send_message(
             "⚠️ Você já tem um personagem. Use `/apagar_ficha` para recomeçar.", ephemeral=True
         )
         return
+
+    base = {"forca": forca, "agilidade": agilidade, "mente": mente, "presenca": presenca}
+    final, beneficiado = apply_race_bonus(
+        base, race_key, bonus_humano.value if bonus_humano else None
+    )
+    klass_key = classe.value
+    hp = max_hp(final["forca"], race_key, klass_key, 1)
+    mp = max_mp(final["mente"], race_key, klass_key, 1)
+
     bot.db.create_character(
-        interaction.guild.id, interaction.user.id, nome[:50],
-        forca, agilidade, mente, presenca, max_hp(forca),
+        interaction.guild.id, interaction.user.id, nome[:50], race_key, klass_key,
+        final["forca"], final["agilidade"], final["mente"], final["presenca"], hp, mp,
     )
     row = bot.db.get_character(interaction.guild.id, interaction.user.id)
     await refresh_sheet(interaction.guild, row)
+
+    fichas = interaction.guild.get_channel(campaign["fichas_channel_id"])
     await interaction.response.send_message(
-        f"⚔️ **{nome}** entrou na aventura! Ficha publicada no canal de fichas."
+        f"⚔️ **{nome}**, {raca.name} {classe.name}, entrou na aventura!\n"
+        f"-# Bônus racial: **+1 {ATTR_LABELS[beneficiado]}** · "
+        f"**{hp} HP** · **{mp} MP** · ficha em {fichas.mention if fichas else '#fichas'}"
     )
 
 
@@ -235,6 +335,29 @@ async def apagar_ficha(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(f"🪦 {row['name']} deixou a história.", ephemeral=True)
 
 
+@bot.tree.command(name="xp", description="Dá XP a um jogador (mestre da mesa)")
+@app_commands.describe(jogador="Quem recebe o XP", quantidade="Quanto XP (pode ser negativo)")
+@app_commands.default_permissions(manage_guild=True)
+async def xp(interaction: discord.Interaction, jogador: discord.Member, quantidade: int) -> None:
+    row = bot.db.get_character(interaction.guild.id, jogador.id)
+    if row is None:
+        await interaction.response.send_message(
+            f"⚠️ {jogador.display_name} não tem personagem.", ephemeral=True
+        )
+        return
+    antes, depois = bot.db.grant_xp(row["id"], quantidade)
+    atualizado = bot.db.get_character(interaction.guild.id, jogador.id)
+    await refresh_sheet(interaction.guild, atualizado)
+
+    msg = f"✨ **{row['name']}** recebeu **{quantidade:+d} XP** (total: {atualizado['xp']})."
+    if depois > antes:
+        msg += (
+            f"\n🎉 **SUBIU PARA O NÍVEL {depois}!** "
+            f"Agora tem **{atualizado['hp_max']} HP** e **{atualizado['mp_max']} MP**."
+        )
+    await interaction.response.send_message(msg)
+
+
 # ─────────────────────────────  cena & narração  ─────────────────────────────
 
 @bot.tree.command(name="cena", description="Abre uma nova cena (o Narrador descreve)")
@@ -255,7 +378,6 @@ async def cena(interaction: discord.Interaction, descricao: str) -> None:
     embed = discord.Embed(description=narration, color=discord.Color.purple())
     embed.set_author(name="🎭 Nova cena")
     msg = await mesa.send(embed=embed)
-    # A cena zera o "checkpoint": conversas antigas não entram na próxima narração
     bot.db.set_last_narrated(interaction.guild.id, msg.id)
     if interaction.channel_id != campaign["mesa_channel_id"]:
         await interaction.followup.send(f"🎬 Cena aberta em {mesa.mention}!")
@@ -263,13 +385,13 @@ async def cena(interaction: discord.Interaction, descricao: str) -> None:
         await interaction.followup.send("🎬 *A cena se abre...*", ephemeral=True)
 
 
-def _coletar_acoes(
+def _coletar_mensagens(
     messages: list[discord.Message],
     chars_by_user: dict[int, sqlite3.Row],
 ) -> tuple[list[tuple[str, str]], int]:
-    """Filtra as mensagens da mesa → [(personagem, texto)] e conta as ignoradas."""
-    actions: list[tuple[str, str]] = []
-    ignoradas = 0
+    """Filtra as mensagens da mesa → [(personagem, texto cru)] e conta as ignoradas."""
+    coletadas: list[tuple[str, str]] = []
+    sem_ficha = 0
     for m in messages:
         if m.author.bot:
             continue
@@ -278,10 +400,10 @@ def _coletar_acoes(
             continue
         char = chars_by_user.get(m.author.id)
         if char is None or not char["alive"]:
-            ignoradas += 1
+            sem_ficha += 1
             continue
-        actions.append((char["name"], text[:MAX_MESSAGE_CHARS]))
-    return actions, ignoradas
+        coletadas.append((char["name"], text[:MAX_MESSAGE_CHARS]))
+    return coletadas, sem_ficha
 
 
 @bot.tree.command(
@@ -302,7 +424,6 @@ async def narrar(interaction: discord.Interaction) -> None:
         )
         return
 
-    # coleta as mensagens desde o checkpoint
     last_id = campaign["last_narrated_id"]
     after = discord.Object(id=last_id) if last_id else None
     try:
@@ -316,17 +437,17 @@ async def narrar(interaction: discord.Interaction) -> None:
         return
 
     chars_by_user = {r["user_id"]: r for r in bot.db.get_characters(guild.id)}
-    actions, ignoradas = _coletar_acoes(history, chars_by_user)
+    mensagens, sem_ficha = _coletar_mensagens(history, chars_by_user)
 
-    if not actions:
-        dica = " (mensagens de quem não tem ficha são ignoradas — `/criar_ficha`)" if ignoradas else ""
+    if not mensagens:
+        dica = " (quem não tem ficha é ignorado — use `/criar_ficha`)" if sem_ficha else ""
         await interaction.followup.send(
             f"🤷 Nada novo na mesa desde a última narração{dica}.", ephemeral=True
         )
         return
 
     try:
-        outcome = await bot.orch.narrate_beat(guild.id, actions)
+        outcome = await bot.orch.narrate_beat(guild.id, mensagens)
     except Exception as e:  # noqa: BLE001
         log.exception("Erro ao narrar")
         await interaction.followup.send(f"❌ O Mestre tropeçou nos bastidores: `{e}`")
@@ -335,20 +456,11 @@ async def narrar(interaction: discord.Interaction) -> None:
     embed = discord.Embed(description=outcome.narration[:4000], color=discord.Color.dark_teal())
     embed.set_author(name="🎭 O Mestre narra")
     if outcome.roll_lines:
-        embed.add_field(
-            name="🎲 Testes",
-            value="\n".join(outcome.roll_lines)[:1000],
-            inline=False,
-        )
+        embed.add_field(name="🎲 Testes", value="\n".join(outcome.roll_lines)[:1000], inline=False)
     if outcome.delta_lines:
-        embed.add_field(
-            name="📋 Fichas",
-            value="\n".join(outcome.delta_lines)[:1000],
-            inline=False,
-        )
+        embed.add_field(name="📋 Fichas", value="\n".join(outcome.delta_lines)[:1000], inline=False)
     narr_msg = await mesa.send(embed=embed)
 
-    # checkpoint: a narração cobre tudo até aqui
     bot.db.set_last_narrated(guild.id, narr_msg.id)
 
     for row in outcome.updated_rows:
