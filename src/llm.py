@@ -24,7 +24,12 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 1024,
 ) -> str:
-    """Uma chamada ao OpenRouter, com retry simples."""
+    """Uma chamada ao OpenRouter, com retry simples.
+
+    Modelos de raciocínio (ex.: tencent/hy3) gastam o max_tokens "pensando" e
+    devolvem content vazio — por isso pedimos reasoning desligado e, se o
+    provedor não aceitar o parâmetro, retiramos e tentamos de novo.
+    """
     payload = {
         "model": model,
         "messages": [
@@ -39,16 +44,33 @@ async def chat(
         "Content-Type": "application/json",
         "X-Title": "DDR RPG Bot",
     }
+    disable_reasoning = True
     last_err: Optional[Exception] = None
     for attempt in range(3):
+        body = dict(payload)
+        if disable_reasoning:
+            body["reasoning"] = {"enabled": False}
         try:
             timeout = aiohttp.ClientTimeout(total=90)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(config.OPENROUTER_URL, json=payload, headers=headers) as resp:
+                async with session.post(config.OPENROUTER_URL, json=body, headers=headers) as resp:
                     data = await resp.json()
                     if resp.status != 200:
+                        # provedor rejeitou o parâmetro reasoning? tira e tenta de novo
+                        if resp.status == 400 and disable_reasoning and "reasoning" in str(data).lower():
+                            disable_reasoning = False
+                            log.warning("Modelo %s rejeitou reasoning=off; repetindo sem o parâmetro.", model)
+                            continue
                         raise LLMError(f"OpenRouter {resp.status}: {data}")
-                    return data["choices"][0]["message"]["content"].strip()
+                    choice = data["choices"][0]
+                    content = (choice["message"].get("content") or "").strip()
+                    if not content:
+                        finish = choice.get("finish_reason")
+                        raise LLMError(
+                            f"resposta sem conteúdo (finish_reason={finish}; "
+                            f"provável orçamento gasto em raciocínio)"
+                        )
+                    return content
         except Exception as e:  # noqa: BLE001
             last_err = e
             log.warning("Tentativa %d falhou (%s): %s", attempt + 1, model, e)
