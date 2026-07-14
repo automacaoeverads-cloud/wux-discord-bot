@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config, dice, parsing
-from .agents import arbiter, chronicler, narrator, scribe
+from .agents import arbiter, chronicler, narrator, rewards, scribe
 from .db import Database
-from .rules import ATTR_LABELS, CLASSES, DIFFICULTIES, RACES
+from .rules import ATTR_LABELS, CLASSES, DIFFICULTIES, RACES, abilities_for
 
 
 @dataclass
@@ -29,6 +29,7 @@ class BeatOutcome:
     roll_lines: list[str] = field(default_factory=list)
     delta_lines: list[str] = field(default_factory=list)
     updated_rows: list[sqlite3.Row] = field(default_factory=list)
+    reward: Optional[dict] = None   # sugestão de XP p/ o canal off-topic (ou None)
 
 
 def short_brief(row: sqlite3.Row) -> str:
@@ -41,12 +42,16 @@ def short_brief(row: sqlite3.Row) -> str:
 def character_brief(row: sqlite3.Row) -> str:
     inv = ", ".join(json.loads(row["inventory"])) or "nada"
     conds = ", ".join(json.loads(row["conditions"])) or "nenhuma"
+    skills = ", ".join(
+        a["name"] + (f" ({a['mp']} MP)" if a["mp"] else "")
+        for a in abilities_for(row["klass"], row["level"])
+    ) or "nenhuma"
     return (
         f"- {row['name']} — {short_brief(row)} | "
         f"HP {row['hp']}/{row['hp_max']}, MP {row['mp']}/{row['mp_max']} | "
         f"For {row['forca']:+d}, Agi {row['agilidade']:+d}, "
         f"Men {row['mente']:+d}, Pre {row['presenca']:+d} | "
-        f"itens: {inv} | condições: {conds}"
+        f"habilidades: {skills} | itens: {inv} | condições: {conds}"
     )
 
 
@@ -167,10 +172,22 @@ class Orchestrator:
                 f"Narração: {narration[:300]}",
             )
 
-            # 6. Cronista compacta se o histórico cresceu
+            # 6. Tesoureiro: houve combate/quest concluída? Sugere XP (nunca concede)
+            reward = None
+            try:
+                suggestion = await rewards.suggest(script, facts, narration, party)
+                if suggestion:
+                    valid = [a for a in suggestion["awards"]
+                             if a["character"].lower() in by_name]
+                    if valid:
+                        reward = {"title": suggestion["title"], "awards": valid}
+            except Exception:  # noqa: BLE001
+                pass  # sugestão de XP nunca derruba a narração
+
+            # 7. Cronista compacta se o histórico cresceu
             await self._maybe_chronicle(guild_id)
 
-            return BeatOutcome(narration, roll_lines, delta_lines, updated_rows)
+            return BeatOutcome(narration, roll_lines, delta_lines, updated_rows, reward)
 
     async def open_scene(self, guild_id: int, description: str) -> str:
         async with self._lock(guild_id):
