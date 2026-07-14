@@ -9,8 +9,10 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
+# Narrador: escreve a prosa da mesa — vale o modelo bom.
 MODEL_NARRATOR = os.getenv("MODEL_NARRATOR", "deepseek/deepseek-v4-pro")
-MODEL_UTILITY = os.getenv("MODEL_UTILITY", "deepseek/deepseek-v4-pro")
+# Árbitro, Escriba e Cronista: só JSON estruturado e resumos — modelo rápido/barato.
+MODEL_UTILITY = os.getenv("MODEL_UTILITY", "deepseek/deepseek-v4-flash")
 
 DB_PATH = os.getenv("DB_PATH", "./data/ddr.db")
 
