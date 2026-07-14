@@ -26,32 +26,36 @@ async def chat(
 ) -> str:
     """Uma chamada ao OpenRouter, com retry simples.
 
-    Modelos de raciocínio (ex.: tencent/hy3) gastam o max_tokens "pensando" e
-    devolvem content vazio — por isso pedimos reasoning desligado e, se o
-    provedor não aceitar o parâmetro, retiramos e tentamos de novo.
+    Modelos de raciocínio (ex.: tencent/hy3) gastam tokens "pensando" antes de
+    escrever. Alguns ignoram o pedido de desligar o raciocínio — então damos um
+    colchão de orçamento (REASONING_HEADROOM) e, se ainda assim o content voltar
+    vazio por `length`, dobramos o orçamento e tentamos de novo.
     """
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "X-Title": "DDR RPG Bot",
     }
+    budget = max_tokens + config.REASONING_HEADROOM
     disable_reasoning = True
     last_err: Optional[Exception] = None
+
     for attempt in range(3):
-        body = dict(payload)
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+            "max_tokens": budget,
+        }
         if disable_reasoning:
-            body["reasoning"] = {"enabled": False}
+            # Pede sem raciocínio; modelos que sempre raciocinam ignoram isso
+            # (por isso o colchão acima). `exclude` mantém o content limpo.
+            body["reasoning"] = {"enabled": False, "exclude": True}
         try:
-            timeout = aiohttp.ClientTimeout(total=90)
+            timeout = aiohttp.ClientTimeout(total=120)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(config.OPENROUTER_URL, json=body, headers=headers) as resp:
                     data = await resp.json()
@@ -62,19 +66,26 @@ async def chat(
                             log.warning("Modelo %s rejeitou reasoning=off; repetindo sem o parâmetro.", model)
                             continue
                         raise LLMError(f"OpenRouter {resp.status}: {data}")
+
                     choice = data["choices"][0]
                     content = (choice["message"].get("content") or "").strip()
-                    if not content:
-                        finish = choice.get("finish_reason")
-                        raise LLMError(
-                            f"resposta sem conteúdo (finish_reason={finish}; "
-                            f"provável orçamento gasto em raciocínio)"
+                    if content:
+                        return content
+
+                    finish = choice.get("finish_reason")
+                    if finish == "length":
+                        # o raciocínio comeu todo o orçamento — dobra e retenta
+                        budget *= 2
+                        log.warning(
+                            "Modelo %s gastou o orçamento raciocinando; "
+                            "aumentando max_tokens para %d.", model, budget,
                         )
-                    return content
+                    raise LLMError(f"resposta sem conteúdo (finish_reason={finish})")
         except Exception as e:  # noqa: BLE001
             last_err = e
             log.warning("Tentativa %d falhou (%s): %s", attempt + 1, model, e)
             await asyncio.sleep(2 * (attempt + 1))
+
     raise LLMError(f"OpenRouter falhou após 3 tentativas: {last_err}")
 
 
