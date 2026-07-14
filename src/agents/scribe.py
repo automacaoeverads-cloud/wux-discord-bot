@@ -9,14 +9,22 @@ from typing import Any
 
 from .. import config, llm
 
-SYSTEM = """Você é o Escriba de uma mesa de RPG. Leia a narração e extraia APENAS mudanças \
-de estado explícitas ou claramente implicadas, para CADA personagem do grupo afetado.
+SYSTEM = """Você é o Escriba de uma mesa de RPG de fantasia medieval. Leia a narração e \
+extraia APENAS mudanças de estado explícitas ou claramente implicadas, para CADA personagem \
+do grupo que foi afetado.
 
-Seja conservador: na dúvida, não mude nada. Dano leve = 1-3, moderado = 4-6, grave = 7-10.
+Regras:
+- Seja conservador: na dúvida, não mude nada.
+- Dano leve = 1-3, moderado = 4-6, grave = 7-10.
+- MP só cai quando o personagem CLARAMENTE lançou uma magia ou usou habilidade mágica \
+  (magia simples = 1-2, média = 3-4, poderosa = 5-8).
+- Não invente itens que a narração não menciona.
+- Não conceda XP (isso é do mestre humano).
 
 Responda APENAS com JSON, sem outro texto:
 {"deltas": [{"character": "nome exato do personagem",
              "hp_change": inteiro (negativo = dano, positivo = cura, 0 = nada),
+             "mp_change": inteiro (negativo = gastou magia, positivo = recuperou, 0 = nada),
              "items_added": ["item", ...],
              "items_removed": ["item", ...],
              "conditions_added": ["condição", ...],
@@ -26,6 +34,7 @@ Só inclua personagens que tiveram alguma mudança. Se ninguém mudou, responda 
 
 EMPTY_DELTA: dict[str, Any] = {
     "hp_change": 0,
+    "mp_change": 0,
     "items_added": [],
     "items_removed": [],
     "conditions_added": [],
@@ -35,9 +44,10 @@ EMPTY_DELTA: dict[str, Any] = {
 
 def _sanitize(item: dict[str, Any]) -> dict[str, Any]:
     delta = dict(EMPTY_DELTA)
-    hp = item.get("hp_change", 0)
-    if isinstance(hp, int) and -15 <= hp <= 15:
-        delta["hp_change"] = hp
+    for key, limit in (("hp_change", 15), ("mp_change", 15)):
+        value = item.get(key, 0)
+        if isinstance(value, int) and -limit <= value <= limit:
+            delta[key] = value
     for key in ("items_added", "items_removed", "conditions_added", "conditions_removed"):
         value = item.get(key, [])
         if isinstance(value, list):
@@ -48,7 +58,7 @@ def _sanitize(item: dict[str, Any]) -> dict[str, Any]:
 async def extract_deltas(narration: str, party_brief: str) -> dict[str, dict[str, Any]]:
     """Retorna {nome_do_personagem: delta} apenas para quem mudou."""
     user = (
-        f"GRUPO: {party_brief}\n\n"
+        f"GRUPO:\n{party_brief}\n\n"
         f"NARRAÇÃO:\n{narration}\n\n"
         f"Extraia os deltas de estado de cada personagem afetado."
     )
