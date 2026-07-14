@@ -89,18 +89,28 @@ Modelos padrão (troque via env, sem mexer no código):
 - 20 natural = crítico, 1 natural = desastre
 - **HP** = 10 + 2×Força + bônus de raça/classe + 2 por nível
 - **MP** = base da classe + Mente + bônus de raça + 1 por nível
-- **XP** = 100 por nível (até o 10º), concedido pelo mestre com `/xp`
 
 **Raças:** Humano, Elfo, Anão, Halfling, Orc, Gnomo, Tiefling
-**Classes:** Guerreiro, Ladino, Mago, Clérigo, Patrulheiro, Bardo
+**Classes:** Guerreiro, Ladino, Mago, Clérigo, Patrulheiro, Bardo — cada uma com
+**habilidades nos níveis 1, 3 e 5** (árvore em `rules.py`)
 
-*(definidos em `rules.py` — o bot publica a tabela completa no canal `📖-regras`)*
+### XP e níveis
+
+Tabela progressiva (XP **total** acumulado): N2 100 · N3 250 · N4 450 · N5 700 ·
+N6 1000 · N7 1400 · N8 1900 · N9 2500 · N10 3200.
+
+Ao fim de um **combate vencido** ou **missão concluída**, o agente Tesoureiro detecta
+o marco e posta uma **sugestão de XP** no canal `💬-off-topic` (escaramuça 20-30,
+combate sério 40-60, chefe 70-100...). **Quem concede é o mestre humano**, com
+`/xp jogador quantidade` — a IA nunca altera XP sozinha.
+
+*(tudo definido em `rules.py` — o bot publica as tabelas completas no canal `📖-regras`)*
 
 ## Comandos
 
 | Comando | O que faz |
 |---|---|
-| `/iniciar [nome]` | **Cria a mesa inteira**: categoria + `📖-regras`, `🎭-mesa`, `📜-fichas` (precisa de Gerenciar Canais) |
+| `/iniciar [nome]` | **Cria a mesa inteira**: categoria + `📖-regras`, `🎭-mesa`, `📜-fichas`, `💬-off-topic` (precisa de Gerenciar Canais) |
 | `/criar_ficha` | Cria seu personagem (nome, raça, classe, atributos) |
 | `/ficha` | Mostra sua ficha (privado) |
 | `/apagar_ficha` | Apaga seu personagem |
