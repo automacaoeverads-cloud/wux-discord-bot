@@ -49,8 +49,14 @@ Princípios:
 - **Cada agente faz uma coisa só** e retorna JSON validado com defaults seguros.
 - **Narrador recebe os resultados como fatos** e não pode contradizê-los.
 
-Modelo padrão de todos os agentes: `tencent/hy3:free` (troque via env
+Modelo padrão de todos os agentes: `deepseek/deepseek-v4-pro` (troque via env
 `MODEL_NARRATOR` / `MODEL_UTILITY`).
+
+> **Nota sobre modelos de raciocínio.** Modelos que "pensam" antes de responder
+> (ex.: `tencent/hy3`) gastam o orçamento de tokens no raciocínio e devolvem
+> conteúdo vazio (`finish_reason=length`). O `llm.py` já soma um colchão
+> (`REASONING_HEADROOM`, padrão 3000) e dobra o orçamento ao detectar isso — mas
+> se um modelo desses continuar falhando, prefira um modelo não-raciocinante.
 
 ## Sistema de regras
 
