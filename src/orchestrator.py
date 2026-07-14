@@ -2,18 +2,19 @@ from __future__ import annotations
 
 """Orquestrador determinístico: código coordena os agentes, nunca o contrário.
 
-Pipeline de uma ação:
-  1. Árbitro decide se há rolagem (JSON validado)
-  2. CÓDIGO rola o d20 e fixa o resultado
-  3. Narrador escreve a prosa a partir do fato
-  4. Escriba extrai deltas → código valida e aplica no SQLite
-  5. Cronista compacta o histórico quando ele cresce demais
+Pipeline de um beat (/narrar):
+  1. Código coleta as mensagens da mesa desde a última narração (feito no bot)
+  2. Árbitro decide quais personagens precisam rolar (JSON validado)
+  3. CÓDIGO rola os d20 e fixa os resultados
+  4. Narrador escreve a prosa a partir dos fatos
+  5. Escriba extrai deltas por personagem → código valida e aplica no SQLite
+  6. Cronista compacta o histórico quando ele cresce demais
 """
 
 import asyncio
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config, dice
@@ -23,11 +24,11 @@ from .rules import ATTR_LABELS, DIFFICULTIES
 
 
 @dataclass
-class ActionOutcome:
+class BeatOutcome:
     narration: str
-    roll_text: Optional[str]      # linha da rolagem, ou None se não houve
-    delta_text: Optional[str]     # resumo das mudanças de ficha, ou None
-    character_updated: Optional[sqlite3.Row]
+    roll_lines: list[str] = field(default_factory=list)   # uma linha por rolagem
+    delta_lines: list[str] = field(default_factory=list)  # uma linha por ficha alterada
+    updated_rows: list[sqlite3.Row] = field(default_factory=list)
 
 
 def character_brief(row: sqlite3.Row) -> str:
@@ -71,62 +72,80 @@ class Orchestrator:
             self._locks[guild_id] = asyncio.Lock()
         return self._locks[guild_id]
 
-    async def handle_action(self, guild_id: int, user_id: int, action: str) -> ActionOutcome:
+    async def narrate_beat(self, guild_id: int, actions: list[tuple[str, str]]) -> BeatOutcome:
+        """Processa um beat: `actions` = [(nome_do_personagem, texto), ...] na ordem do chat."""
         async with self._lock(guild_id):
             campaign = self.db.get_campaign(guild_id)
-            char = self.db.get_character(guild_id, user_id)
-            if campaign is None or char is None:
-                raise ValueError("Campanha ou personagem não encontrados.")
-
-            brief = character_brief(char)
+            if campaign is None:
+                raise ValueError("Campanha não configurada.")
+            rows = self.db.get_characters(guild_id)
+            by_name = {r["name"].lower(): r for r in rows}
             scene = campaign["scene"]
+            party = party_brief(rows)
 
-            # 1. Árbitro (IA decide SE rola, código valida)
-            verdict = await arbiter.judge(action, brief, scene)
+            script = "\n".join(f"{name}: {text}" for name, text in actions)
 
-            # 2. Código rola o dado — resultado vira fato imutável
-            roll_text: Optional[str] = None
-            if verdict["needs_roll"]:
-                attr = verdict["attribute"]
-                dc = DIFFICULTIES[verdict["difficulty"]]
+            # 1. Árbitro decide quem rola (código valida os nomes)
+            verdicts = await arbiter.judge_beat(script, party, scene)
+
+            # 2. Código rola os dados — resultados viram fatos imutáveis
+            roll_lines: list[str] = []
+            fact_lines: list[str] = []
+            for v in verdicts:
+                char = by_name.get(v["character"].lower())
+                if char is None:
+                    continue
+                attr, dc = v["attribute"], DIFFICULTIES[v["difficulty"]]
                 result = dice.roll_check(char[attr], dc)
-                roll_text = result.describe(ATTR_LABELS[attr])
-                mechanical = (
-                    f"Teste de {ATTR_LABELS[attr]} (CD {dc}): "
-                    f"{'SUCESSO CRÍTICO' if result.critical else 'DESASTRE' if result.fumble else 'SUCESSO' if result.success else 'FALHA'}"
-                    f" (motivo do teste: {verdict['reason']})"
+                roll_lines.append(f"{char['name']}: {result.describe(ATTR_LABELS[attr])}")
+                outcome = (
+                    "SUCESSO CRÍTICO" if result.critical else
+                    "DESASTRE" if result.fumble else
+                    "SUCESSO" if result.success else "FALHA"
                 )
-            else:
-                mechanical = "Nenhum teste necessário — a ação simplesmente acontece."
+                fact_lines.append(
+                    f"- {char['name']} — teste de {ATTR_LABELS[attr]} (CD {dc}): {outcome} "
+                    f"(motivo: {v['reason']})"
+                )
+            facts = "\n".join(fact_lines) or "Nenhum teste foi necessário — as ações simplesmente acontecem."
 
-            # 3. Narrador escreve a prosa a partir do fato
+            # 3. Narrador escreve a prosa a partir dos fatos
             recent = "\n".join(
                 f"- [{e['kind']}] {e['content']}"
                 for e in self.db.recent_events(guild_id, config.RECENT_EVENTS)
             )
-            party = party_brief(self.db.get_characters(guild_id))
-            narration = await narrator.narrate(
-                action, char["name"], mechanical, scene,
-                campaign["summary"], recent, party,
+            narration = await narrator.narrate_beat(
+                script, facts, scene, campaign["summary"], recent, party,
             )
 
-            # 4. Escriba extrai deltas → código aplica com validação
-            delta = await scribe.extract_delta(narration, char["name"], brief)
-            delta_text = describe_delta(delta)
-            if delta_text:
+            # 4. Escriba extrai deltas por personagem → código aplica com validação
+            delta_lines: list[str] = []
+            updated_rows: list[sqlite3.Row] = []
+            deltas = await scribe.extract_deltas(narration, party)
+            for name, delta in deltas.items():
+                char = by_name.get(name.lower())
+                if char is None:
+                    continue
+                text = describe_delta(delta)
+                if not text:
+                    continue
                 self.db.apply_delta(char["id"], delta)
+                delta_lines.append(f"{char['name']}: {text}")
+                updated_rows.append(
+                    self.db.get_character(guild_id, char["user_id"])
+                )
 
-            # Registra o evento no histórico
+            # Registra o beat no histórico
+            resumo_facts = "; ".join(fact_lines) or "sem testes"
             self.db.add_event(
-                guild_id, "acao",
-                f"{char['name']}: {action} → {mechanical}. {narration[:300]}",
+                guild_id, "beat",
+                f"Ações: {script[:400]} → {resumo_facts[:300]}. Narração: {narration[:300]}",
             )
 
             # 5. Cronista compacta se o histórico cresceu
             await self._maybe_chronicle(guild_id)
 
-            updated = self.db.get_character(guild_id, user_id)
-            return ActionOutcome(narration, roll_text, delta_text, updated)
+            return BeatOutcome(narration, roll_lines, delta_lines, updated_rows)
 
     async def open_scene(self, guild_id: int, description: str) -> str:
         async with self._lock(guild_id):
