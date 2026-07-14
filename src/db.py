@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from typing import Any, Optional
+
+from . import config
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS campaigns (
+    guild_id INTEGER PRIMARY KEY,
+    mesa_channel_id INTEGER NOT NULL,
+    fichas_channel_id INTEGER NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    scene TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    forca INTEGER NOT NULL,
+    agilidade INTEGER NOT NULL,
+    mente INTEGER NOT NULL,
+    presenca INTEGER NOT NULL,
+    hp INTEGER NOT NULL,
+    hp_max INTEGER NOT NULL,
+    inventory TEXT NOT NULL DEFAULT '[]',
+    conditions TEXT NOT NULL DEFAULT '[]',
+    sheet_message_id INTEGER,
+    alive INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    ts DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+class Database:
+    """Fonte única da verdade do estado do jogo."""
+
+    def __init__(self, path: str = config.DB_PATH) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA)
+        self.conn.commit()
+
+    # --- campanha ---
+
+    def setup_campaign(self, guild_id: int, mesa_id: int, fichas_id: int) -> None:
+        self.conn.execute(
+            "INSERT INTO campaigns (guild_id, mesa_channel_id, fichas_channel_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET mesa_channel_id=?, fichas_channel_id=?",
+            (guild_id, mesa_id, fichas_id, mesa_id, fichas_id),
+        )
+        self.conn.commit()
+
+    def get_campaign(self, guild_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM campaigns WHERE guild_id=?", (guild_id,)
+        ).fetchone()
+
+    def set_summary(self, guild_id: int, summary: str) -> None:
+        self.conn.execute("UPDATE campaigns SET summary=? WHERE guild_id=?", (summary, guild_id))
+        self.conn.commit()
+
+    def set_scene(self, guild_id: int, scene: str) -> None:
+        self.conn.execute("UPDATE campaigns SET scene=? WHERE guild_id=?", (scene, guild_id))
+        self.conn.commit()
+
+    # --- personagens ---
+
+    def create_character(
+        self, guild_id: int, user_id: int, name: str,
+        forca: int, agilidade: int, mente: int, presenca: int, hp_max: int,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO characters (guild_id, user_id, name, forca, agilidade, mente, presenca, hp, hp_max) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, user_id, name, forca, agilidade, mente, presenca, hp_max, hp_max),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_character(self, guild_id: int, user_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM characters WHERE guild_id=? AND user_id=?", (guild_id, user_id)
+        ).fetchone()
+
+    def get_characters(self, guild_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM characters WHERE guild_id=? AND alive=1", (guild_id,)
+        ).fetchall()
+
+    def delete_character(self, guild_id: int, user_id: int) -> None:
+        self.conn.execute(
+            "DELETE FROM characters WHERE guild_id=? AND user_id=?", (guild_id, user_id)
+        )
+        self.conn.commit()
+
+    def set_sheet_message(self, char_id: int, message_id: int) -> None:
+        self.conn.execute(
+            "UPDATE characters SET sheet_message_id=? WHERE id=?", (message_id, char_id)
+        )
+        self.conn.commit()
+
+    def apply_delta(self, char_id: int, delta: dict[str, Any]) -> None:
+        """Aplica um delta validado do Escriba. Só campos permitidos, com clamps."""
+        row = self.conn.execute("SELECT * FROM characters WHERE id=?", (char_id,)).fetchone()
+        if row is None:
+            return
+
+        hp = row["hp"]
+        hp_change = delta.get("hp_change", 0)
+        if isinstance(hp_change, int):
+            hp = max(0, min(row["hp_max"], hp + hp_change))
+
+        inventory = json.loads(row["inventory"])
+        for item in delta.get("items_added", []) or []:
+            if isinstance(item, str) and item.strip():
+                inventory.append(item.strip())
+        for item in delta.get("items_removed", []) or []:
+            if item in inventory:
+                inventory.remove(item)
+
+        conditions = json.loads(row["conditions"])
+        for cond in delta.get("conditions_added", []) or []:
+            if isinstance(cond, str) and cond.strip() and cond not in conditions:
+                conditions.append(cond.strip())
+        for cond in delta.get("conditions_removed", []) or []:
+            if cond in conditions:
+                conditions.remove(cond)
+
+        alive = 0 if hp <= 0 else row["alive"]
+        self.conn.execute(
+            "UPDATE characters SET hp=?, inventory=?, conditions=?, alive=? WHERE id=?",
+            (hp, json.dumps(inventory, ensure_ascii=False),
+             json.dumps(conditions, ensure_ascii=False), alive, char_id),
+        )
+        self.conn.commit()
+
+    # --- eventos / histórico ---
+
+    def add_event(self, guild_id: int, kind: str, content: str) -> None:
+        self.conn.execute(
+            "INSERT INTO events (guild_id, kind, content) VALUES (?, ?, ?)",
+            (guild_id, kind, content),
+        )
+        self.conn.commit()
+
+    def recent_events(self, guild_id: int, limit: int) -> list[sqlite3.Row]:
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE guild_id=? ORDER BY id DESC LIMIT ?",
+            (guild_id, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+    def event_count(self, guild_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE guild_id=?", (guild_id,)
+        ).fetchone()
+        return int(row["n"])
+
+    def pop_oldest_events(self, guild_id: int, keep_recent: int) -> list[sqlite3.Row]:
+        """Remove e retorna os eventos antigos, mantendo os `keep_recent` mais novos."""
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE guild_id=? ORDER BY id DESC LIMIT -1 OFFSET ?",
+            (guild_id, keep_recent),
+        ).fetchall()
+        if rows:
+            ids = [r["id"] for r in rows]
+            self.conn.execute(
+                f"DELETE FROM events WHERE id IN ({','.join('?' * len(ids))})", ids
+            )
+            self.conn.commit()
+        return list(reversed(rows))
