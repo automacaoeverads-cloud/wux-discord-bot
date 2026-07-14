@@ -49,8 +49,12 @@ Princípios:
 - **Cada agente faz uma coisa só** e retorna JSON validado com defaults seguros.
 - **Narrador recebe os resultados como fatos** e não pode contradizê-los.
 
-Modelo padrão de todos os agentes: `deepseek/deepseek-v4-pro` (troque via env
-`MODEL_NARRATOR` / `MODEL_UTILITY`).
+Modelos padrão (troque via env, sem mexer no código):
+
+| Env | Agentes | Padrão | Por quê |
+|---|---|---|---|
+| `MODEL_NARRATOR` | Narrador | `deepseek/deepseek-v4-pro` | escreve a prosa da mesa — vale o modelo bom |
+| `MODEL_UTILITY` | Árbitro, Escriba, Cronista | `deepseek/deepseek-v4-flash` | só JSON estruturado e resumos — rápido e barato |
 
 > **Nota sobre modelos de raciocínio.** Modelos que "pensam" antes de responder
 > (ex.: `tencent/hy3`) gastam o orçamento de tokens no raciocínio e devolvem
