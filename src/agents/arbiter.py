@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-"""Árbitro: decide SE a ação exige rolagem, qual atributo e qual CD.
+"""Árbitro: lê tudo que os personagens declararam e decide QUAIS ações exigem
+rolagem, com qual atributo e CD.
 
 Retorna apenas JSON estruturado — nunca narra, nunca rola dados.
 """
@@ -10,38 +11,55 @@ from typing import Any
 from .. import config, llm
 from ..rules import ATTRIBUTES, DIFFICULTIES, RULES_SUMMARY
 
-SYSTEM = f"""Você é o Árbitro de regras de um RPG de mesa. {RULES_SUMMARY}
+SYSTEM = f"""Você é o Árbitro de regras de um RPG de mesa de fantasia medieval. {RULES_SUMMARY}
 
-Dada a ação de um jogador, decida se ela exige um teste de dado.
-Ações triviais (falar, andar, olhar algo óbvio) NÃO exigem teste.
-Ações com risco ou chance de falha exigem teste.
+Você vai receber TUDO que os personagens declararam desde a última narração.
+Para cada PERSONAGEM que tentou algo arriscado, decida se exige um teste de dado.
+- Falar, andar, olhar algo óbvio, interagir socialmente de forma trivial: NÃO exige teste.
+- Atacar, escalar, persuadir sob pressão, esquivar, lançar magia arriscada, furtar: exige teste.
+- No MÁXIMO um teste por personagem (o mais importante do que ele declarou).
+- Personagens que só conversaram não entram na lista.
 
 Responda APENAS com JSON neste formato, sem nenhum outro texto:
-{{"needs_roll": true/false, "attribute": "forca"|"agilidade"|"mente"|"presenca", "difficulty": "facil"|"medio"|"dificil", "reason": "justificativa curta em português"}}
+{{"rolls": [{{"character": "nome exato do personagem",
+             "attribute": "forca"|"agilidade"|"mente"|"presenca",
+             "difficulty": "facil"|"medio"|"dificil",
+             "reason": "justificativa curta em português"}}]}}
 
-Se needs_roll for false, attribute e difficulty podem ser null."""
+Se ninguém precisar rolar, responda {{"rolls": []}}."""
 
 
-async def judge(action: str, character_brief: str, scene: str) -> dict[str, Any]:
+async def judge_beat(script: str, party_brief: str, scene: str) -> list[dict[str, Any]]:
+    """Julga o beat inteiro. Retorna a lista validada de rolagens necessárias."""
     user = (
         f"CENA ATUAL: {scene or 'início da aventura'}\n"
-        f"PERSONAGEM: {character_brief}\n"
-        f"AÇÃO DECLARADA: {action}"
+        f"GRUPO: {party_brief}\n\n"
+        f"DECLARAÇÕES DOS PERSONAGENS (na ordem):\n{script}"
     )
-    result = await llm.chat_json(config.MODEL_UTILITY, SYSTEM, user)
+    try:
+        result = await llm.chat_json(config.MODEL_UTILITY, SYSTEM, user)
+    except llm.LLMError:
+        return []
 
-    # Validação dura: se a IA inventar valores, cai em defaults seguros
-    needs_roll = bool(result.get("needs_roll", False))
-    attribute = result.get("attribute")
-    difficulty = result.get("difficulty")
-    if needs_roll:
+    rolls: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in (result.get("rolls") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("character", "")).strip()
+        if not name or name.lower() in seen:
+            continue
+        attribute = item.get("attribute")
+        difficulty = item.get("difficulty")
         if attribute not in ATTRIBUTES:
             attribute = "agilidade"
         if difficulty not in DIFFICULTIES:
             difficulty = "medio"
-    return {
-        "needs_roll": needs_roll,
-        "attribute": attribute,
-        "difficulty": difficulty,
-        "reason": str(result.get("reason", "")),
-    }
+        seen.add(name.lower())
+        rolls.append({
+            "character": name,
+            "attribute": attribute,
+            "difficulty": difficulty,
+            "reason": str(item.get("reason", ""))[:150],
+        })
+    return rolls
