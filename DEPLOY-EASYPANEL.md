@@ -1,62 +1,47 @@
-# 🚀 Deploy no EasyPanel (VPS)
+# Deploy no EasyPanel
 
-O bot é um **worker** (não expõe porta HTTP) — roda 24/7 num container, buildado a
-partir do `Dockerfile`. O token fica nas **variáveis de ambiente do EasyPanel**, nunca
-no código.
+## 1. Suba o código no GitHub
 
----
-
-## Pré-requisito: o código num repositório Git
-
-O EasyPanel faz deploy a partir de um repo (GitHub/GitLab ou URL Git pública).
-A pasta `discord-bot/` já tem tudo (`Dockerfile`, `.dockerignore`, `requirements.txt`).
-O `.env` **não** vai junto (está no `.gitignore`/`.dockerignore`).
-
----
-
-## Passo a passo no EasyPanel
-
-1. **Projeto** → abra (ou crie) o projeto onde fica o seu n8n etc.
-2. **+ Service → App**.
-3. **Source:**
-   - **GitHub** (conecte a conta e escolha o repo + branch `main`), **ou**
-   - **Git** e cole a URL pública do repositório.
-4. **Build:** selecione **Dockerfile** (caminho: `Dockerfile`).
-   - Se a pasta do bot **não** for a raiz do repo, ajuste o **Build Context / Root** para `discord-bot`.
-5. **Environment** (aba de variáveis): adicione
-   ```
-   DISCORD_TOKEN = (o seu token NOVO, do Reset Token)
-   ```
-6. **Domains / Ports:** deixe **vazio** — é um worker, não tem porta web.
-7. **Deploy.**
-
-Acompanhe a aba **Logs**. Quando aparecer:
+```bash
+git init
+git add .
+git commit -m "DDR RPG bot"
+git remote add origin https://github.com/SEU_USUARIO/ddr-rpg-bot.git
+git push -u origin main
 ```
-✓ 1 comando(s) de barra sincronizado(s).
-✓ Logado como ArtosBot#8859 ...
-  Pronto para rolar os dados dos Mil Reinos.
-```
-está no ar 24/7. 🎲
 
----
+O `.gitignore` já impede que o `.env` (com seus tokens) suba para o repositório.
 
-## Convidar o bot pro servidor (uma vez)
+## 2. Crie o app no EasyPanel
 
-https://discord.com/api/oauth2/authorize?client_id=1284997110759952468&permissions=83968&scope=bot%20applications.commands
+1. **Create Service → App**
+2. **Source**: GitHub → selecione o repositório e a branch `main`
+3. **Build**: Dockerfile (ele detecta o `Dockerfile` na raiz)
+4. **Environment** — adicione as variáveis:
+   - `DISCORD_TOKEN` = token do bot (Discord Developer Portal)
+   - `OPENROUTER_API_KEY` = chave do OpenRouter
+5. **Mounts / Volumes**: monte um volume em `/app/data`
+   (é onde fica o `ddr.db` — sem isso o estado do jogo se perde a cada deploy)
+6. **Não exponha porta nenhuma** — o bot só faz conexões de saída.
+7. Deploy!
 
-Scopes `bot` + `applications.commands`; permissões: Enviar Mensagens, Embed Links,
-Ler Histórico.
+## 3. Convide o bot para o servidor
 
----
+No Discord Developer Portal → OAuth2 → URL Generator:
+- Scopes: `bot`, `applications.commands`
+- Permissões: `Send Messages`, `Embed Links`, `Read Message History`
 
-## Importante
+Abra a URL gerada e adicione o bot ao seu servidor.
 
-- **Um bot, uma instância.** Rodar o mesmo token em dois lugares ao mesmo tempo (ex.: na
-  sua máquina **e** no EasyPanel) causa respostas duplicadas/conflito de sessão. Deixe só
-  o do EasyPanel ligado.
-- **Token novo.** O token antigo foi exposto em chat — gere um novo (Developer Portal →
-  Bot → **Reset Token**) e use **esse** no EasyPanel.
-- **Atualizar o bot depois:** com GitHub, basta dar `git push` na branch — o EasyPanel
-  pode rebuildar automático (ative *Auto Deploy*) ou clique em **Deploy** no painel.
-- **Recursos:** o container é leve (~80–120 MB de RAM). Qualquer plano serve.
-```
+## 4. Primeiro uso
+
+1. Crie dois canais: `#mesa` e `#fichas`
+2. `/iniciar mesa:#mesa fichas:#fichas`
+3. Cada jogador: `/criar_ficha`
+4. `/cena` para abrir a primeira cena — e boa aventura! 🎲
+
+## Atualizações
+
+Todo `git push` na branch `main` pode disparar rebuild automático
+(ative o auto-deploy no EasyPanel). O volume em `/app/data` preserva
+campanhas, fichas e histórico entre deploys.
