@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
     mesa_channel_id INTEGER NOT NULL,
     fichas_channel_id INTEGER NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
-    scene TEXT NOT NULL DEFAULT ''
+    scene TEXT NOT NULL DEFAULT '',
+    last_narrated_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS characters (
@@ -53,6 +54,16 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Migrações leves para bancos criados em versões antigas."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(campaigns)")}
+        if "last_narrated_id" not in cols:
+            self.conn.execute(
+                "ALTER TABLE campaigns ADD COLUMN last_narrated_id INTEGER NOT NULL DEFAULT 0"
+            )
+            self.conn.commit()
 
     # --- campanha ---
 
@@ -75,6 +86,12 @@ class Database:
 
     def set_scene(self, guild_id: int, scene: str) -> None:
         self.conn.execute("UPDATE campaigns SET scene=? WHERE guild_id=?", (scene, guild_id))
+        self.conn.commit()
+
+    def set_last_narrated(self, guild_id: int, message_id: int) -> None:
+        self.conn.execute(
+            "UPDATE campaigns SET last_narrated_id=? WHERE guild_id=?", (message_id, guild_id)
+        )
         self.conn.commit()
 
     # --- personagens ---
