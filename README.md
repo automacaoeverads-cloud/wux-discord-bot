@@ -1,103 +1,65 @@
-# 🎲 Bot de Rolagem — WUX: A Senda dos Mil Reinos
+# DDR — RPG de mesa narrado por IA no Discord
 
-Bot de Discord que rola pools de d6 com as regras do WUX:
+Bot que mestra RPG de mesa em um canal do Discord, com fichas atualizadas
+automaticamente em outro canal. Usa múltiplos agentes de IA via
+[OpenRouter](https://openrouter.ai), coordenados por código determinístico
+para evitar alucinações.
 
-> **5–6 = Êxito ✦** · **6 explode** (rola outro, em cadeia) · **1 = Dissonância**
+## Arquitetura anti-alucinação
 
-Ele faz as explosões sozinho e devolve **êxitos** e **dissonâncias** automaticamente.
+```
+Jogador usa /acao
+      │
+      ▼
+┌─────────────────── ORQUESTRADOR (código, não IA) ───────────────────┐
+│                                                                     │
+│  1. ÁRBITRO (qwen) ─── decide SE rola dado, atributo e CD (JSON)    │
+│  2. CÓDIGO ──────────── rola o d20; resultado vira fato imutável    │
+│  3. NARRADOR (deepseek) escreve a prosa a partir do fato            │
+│  4. ESCRIBA (qwen) ──── extrai deltas de ficha (JSON validado)      │
+│  5. CÓDIGO ──────────── aplica deltas no SQLite com limites         │
+│  6. CRONISTA (qwen) ─── compacta o histórico quando cresce          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+Narração no canal da mesa + ficha atualizada no canal de fichas
+```
 
----
+Princípios:
+- **SQLite é a fonte única da verdade** — a IA nunca "lembra" estado, sempre recebe do banco.
+- **Dados rolados por código** — a IA nunca decide o resultado de um teste.
+- **Cada agente faz uma coisa só** e retorna JSON validado com defaults seguros.
+- **Narrador recebe o resultado como fato** e não pode contradizê-lo.
+
+## Sistema de regras
+
+- 4 atributos: **Força, Agilidade, Mente, Presença** (-1 a +3, soma máx. 5)
+- Teste: **d20 + atributo vs CD** (fácil 10, médio 14, difícil 18)
+- 20 natural = crítico, 1 natural = desastre
+- HP = 10 + 2×Força
 
 ## Comandos
 
-**Barra (recomendado — não exige intent privilegiada):**
-
-| Comando | Faz |
+| Comando | O que faz |
 |---|---|
-| `/rolar dados:8` | rola 8d6 |
-| `/rolar dados:8 modificador:2` | 8 +2 = 10d6 (postura, etc.) |
-| `/rolar dados:8 exitos_bonus:1` | soma **+1 êxito automático** (Supressão de Reino) |
-| `/rolar dados:8 dificuldade:3` | mostra **passou/falhou** e **margem** |
-| `/rolar dados:8 volatil:true` | ação Volátil — **destaca as Dissonâncias** |
-| `/rolar dados:8 rotulo:"Golpe do Arado"` | nomeia a rolagem |
+| `/iniciar mesa fichas` | Configura os canais da campanha |
+| `/criar_ficha` | Cria seu personagem |
+| `/ficha` | Mostra sua ficha (privado) |
+| `/apagar_ficha` | Apaga seu personagem |
+| `/cena descricao` | Abre uma nova cena |
+| `/acao descricao` | Declara o que seu personagem faz |
+| `/historia` | Resumo da campanha até aqui |
 
-**Prefixo (aceita expressões):**
-
-| Comando | Faz |
-|---|---|
-| `!r 8` | rola 8d6 |
-| `!r 8+2 Golpe do Arado` | 8 **+2 dados** = 10d6, com rótulo |
-| `!r 8+2-1` | soma e subtrai dados |
-| `!r 8+1e` | rola 8d6 e soma **+1 êxito automático** ao resultado |
-| `!rv 8 Técnica volátil` | rolagem de ação **Volátil** |
-| `!ajuda` | resumo dos comandos |
-
-> O `!r`/`!rv` precisa da **Message Content Intent** ligada (passo 3). O `/rolar` não precisa.
-
----
-
-## Instalação (uma vez)
+## Rodando local
 
 ```bash
-cd "discord-bot"
-python3 -m pip install --user -r requirements.txt
+cp .env.example .env   # preencha DISCORD_TOKEN e OPENROUTER_API_KEY
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-### 1. Criar o app e o bot
-1. Vá ao [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**.
-2. Aba **Bot** → **Reset Token** → copie o token.
-3. Cole no arquivo `.env` (copie de `.env.example`):
-   ```
-   DISCORD_TOKEN=seu_token_aqui
-   ```
+## Deploy
 
-> ⚠️ **Segurança:** nunca compartilhe o token. Se ele vazar, clique em **Reset Token** — o antigo morre na hora.
-
-### 2. Convidar o bot para o servidor
-Aba **OAuth2 → URL Generator**:
-- **Scopes:** marque `bot` **e** `applications.commands`
-- **Bot Permissions:** `Send Messages`, `Embed Links`, `Read Message History`
-- Abra a URL gerada e escolha o servidor.
-
-### 3. (Só para `!r`/`!rv`) ligar a intent
-Aba **Bot** → **Privileged Gateway Intents** → ligue **Message Content Intent**.
-(Se você só usar `/rolar`, pode deixar desligada — mas o código pede essa intent; veja a nota abaixo.)
-
----
-
-## Rodar
-
-```bash
-cd "discord-bot"
-python3 bot.py
-```
-
-Quando aparecer `✓ Logado como ...`, está no ar. Os comandos de barra podem levar **alguns minutos** para aparecer na primeira sincronização global.
-
-> **Se você NÃO quiser ligar a Message Content Intent:** abra `bot.py` e troque
-> `intents.message_content = True` por `False`. Aí só os comandos `/rolar` funcionam (os `!r` deixam de ler o texto).
-
----
-
-## Estrutura
-
-| Arquivo | O quê |
-|---|---|
-| `dados.py` | motor de rolagem puro (regras WUX) — testável sem Discord |
-| `bot.py` | o bot (comandos, embeds) |
-| `test_dados.py` | testes do motor (`python3 test_dados.py`) |
-| `.env` | seu token (não versionar) |
-| `requirements.txt` | dependências |
-
----
-
-## Manter rodando (opcional)
-
-No Mac, a forma simples é deixar o terminal aberto com `python3 bot.py`. Para rodar
-de fundo:
-
-```bash
-nohup python3 bot.py > bot.log 2>&1 &
-```
-
-Para parar: `pkill -f bot.py`.
+Veja [DEPLOY-EASYPANEL.md](DEPLOY-EASYPANEL.md).
