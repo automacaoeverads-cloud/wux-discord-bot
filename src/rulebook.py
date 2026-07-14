@@ -5,7 +5,7 @@ from __future__ import annotations
 import discord
 
 from .rules import (
-    ATTR_SUM_MAX, CLASSES, DIFFICULTIES, MAX_LEVEL, RACES, XP_PER_LEVEL,
+    ABILITIES, ATTR_SUM_MAX, CLASSES, DIFFICULTIES, MAX_LEVEL, RACES, XP_TABLE,
 )
 
 ROXO = discord.Color.purple()
@@ -50,7 +50,7 @@ def embed_sistema() -> discord.Embed:
         value=(
             "**HP** — sua vida. A 0 você cai.\n"
             "**MP** — sua magia. Cada feitiço custa.\n"
-            f"**XP** — {XP_PER_LEVEL} por nível (até o {MAX_LEVEL}º).\n"
+            f"**XP** — sobe até o nível {MAX_LEVEL} (tabela abaixo).\n"
             "Subir de nível: **+2 HP** e **+1 MP**."
         ),
         inline=True,
@@ -183,6 +183,50 @@ def embed_classes() -> discord.Embed:
     )
 
 
+def embed_xp() -> discord.Embed:
+    linhas = []
+    anterior = 0
+    for lvl, total in XP_TABLE.items():
+        if lvl == 1:
+            linhas.append("Nível  1 — início")
+            continue
+        linhas.append(f"Nível {lvl:>2} — {total:>5} XP total  (+{total - anterior})")
+        anterior = total
+    e = discord.Embed(
+        title="✨ Tabela de experiência",
+        color=discord.Color.gold(),
+        description=(
+            "XP vem de **combates vencidos** e **missões concluídas**. "
+            "Ao final de cada marco, o Mestre-IA posta uma **sugestão de XP** no canal "
+            "off-topic — e o mestre da mesa concede com `/xp`.\n"
+            "```\n" + "\n".join(linhas) + "\n```"
+            "**Referência por marco:** escaramuça 20-30 · combate sério 40-60 · "
+            "chefe 70-100 · missão secundária 30-50 · missão principal 60-100"
+        ),
+    )
+    e.set_footer(text=f"Subir de nível: +2 HP e +1 MP. Nível máximo: {MAX_LEVEL}.")
+    return e
+
+
+def embed_habilidades() -> discord.Embed:
+    e = discord.Embed(
+        title="🌟 Árvore de habilidades (até o nível 5)",
+        color=discord.Color.teal(),
+        description=(
+            "Cada classe desbloqueia uma habilidade nos níveis **1**, **3** e **5**. "
+            "Elas aparecem na sua ficha automaticamente — para usar, basta **descrever na mesa** "
+            "(ex.: `**uso Golpe Poderoso no ogro**`). As que têm custo gastam **MP**."
+        ),
+    )
+    for klass, data in CLASSES.items():
+        linhas = []
+        for a in ABILITIES[klass]:
+            custo = f" `{a['mp']} MP`" if a["mp"] else ""
+            linhas.append(f"**N{a['level']} · {a['name']}**{custo}\n> {a['desc']}")
+        e.add_field(name=f"⚔️ {data['label']}", value="\n".join(linhas), inline=False)
+    return e
+
+
 def embed_comandos() -> discord.Embed:
     e = discord.Embed(title="📋 Comandos", color=discord.Color.greyple())
     e.add_field(
@@ -226,5 +270,7 @@ def all_embeds() -> list[discord.Embed]:
         embed_mestre(),
         embed_racas(),
         embed_classes(),
+        embed_habilidades(),
+        embed_xp(),
         embed_comandos(),
     ]
